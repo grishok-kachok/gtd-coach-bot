@@ -58,11 +58,17 @@ class CoachEngine:
             setting_sources=["project"],
         )
 
-    async def ask(self, text: str) -> str:
-        """Задать вопрос, продолжая прошлый разговор."""
+    async def ask(self, text: str, memory: str = "") -> str:
+        """Задать вопрос, продолжая прошлый разговор.
+
+        Разговор начинается заново каждую ночь, поэтому в первый запрос новой
+        сессии подкладываем выжимки прошлых дней — иначе коуч проснётся с
+        чистой головой и заставит Василия пересказывать вчерашнее.
+        """
         resume = self.sessions.load()
+        prompt = text if resume else self._with_memory(text, memory)
         try:
-            return await self._run(text, resume)
+            return await self._run(prompt, resume)
         except Exception:
             if resume is None:
                 raise
@@ -70,7 +76,20 @@ class CoachEngine:
             # чтобы бот не онемел из-за одной битой ссылки.
             log.warning("не удалось продолжить сессию %s, начинаю новую", resume, exc_info=True)
             self.sessions.clear()
-            return await self._run(text, None)
+            return await self._run(self._with_memory(text, memory), None)
+
+    @staticmethod
+    def _with_memory(text: str, memory: str) -> str:
+        if not memory.strip():
+            return text
+        return (
+            "<память_прошлых_дней>\n"
+            "Это твои же выжимки прошлых разговоров с Василием — самые свежие внизу.\n"
+            "Опирайся на них молча: не пересказывай их и не ссылайся на них вслух.\n\n"
+            f"{memory}\n"
+            "</память_прошлых_дней>\n\n"
+            f"{text}"
+        )
 
     async def _run(self, text: str, resume: str | None) -> str:
         parts: list[str] = []

@@ -17,7 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY prompts/ ./prompts/
 
-RUN useradd -u 1000 -m coach && mkdir -p /brain /state && chown -R coach /app /brain /state
+# Каталоги создаём до монтирования: docker переносит их владельца на новый том
+RUN useradd -u 1000 -m coach && mkdir -p /brain /state /archive \
+    && chown -R coach /app /brain /state /archive
 USER coach
 
 ENV PYTHONUNBUFFERED=1 \

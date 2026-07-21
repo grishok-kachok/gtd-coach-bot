@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -92,3 +92,30 @@ class Archive:
                 "SELECT role, channel, text FROM messages WHERE day=? ORDER BY id", (day,)
             ).fetchall()
         return [(row[0], row[1], row[2]) for row in rows]
+
+    def recent_digests(self, days: int = 30) -> str:
+        """Память для начала нового разговора: дни за последний месяц, а до них — недели и месяцы.
+
+        Этот текст подставляется в первый запрос новой сессии, но НЕ пишется в
+        архив как сообщение — иначе завтрашний транскрипт вобрал бы вчерашние
+        выжимки, и они бы разрастались от пересказа к пересказу.
+        """
+        since = (datetime.now(MOSCOW).date() - timedelta(days=days)).isoformat()
+        with self._connect() as db:
+            fresh = db.execute(
+                "SELECT period_key, text FROM digests WHERE period='day' AND period_key>=? "
+                "ORDER BY period_key",
+                (since,),
+            ).fetchall()
+            older = db.execute(
+                "SELECT period, period_key, text FROM digests WHERE period IN ('week','month') "
+                "ORDER BY period_key DESC LIMIT 8"
+            ).fetchall()
+
+        blocks: list[str] = []
+        for period, key, text in reversed(older):
+            label = "Неделя" if period == "week" else "Месяц"
+            blocks.append(f"{label} {key}:\n{text}")
+        for key, text in fresh:
+            blocks.append(f"День {key}:\n{text}")
+        return "\n\n".join(blocks)

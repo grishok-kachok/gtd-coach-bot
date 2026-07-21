@@ -80,6 +80,7 @@ class CoachBot:
             proxy=env("HTTPS_PROXY") or None,
         )
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
+        self.memory_days = int(env("MEMORY_DAYS", "30"))
         self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
@@ -105,7 +106,9 @@ class CoachBot:
             typing = asyncio.create_task(self._keep_typing(chat_id, context))
             try:
                 await self.brain.pull()
-                answer = await self.engine.ask(text)
+                # Выжимки прошлых дней движок подставит сам, если разговор начинается заново.
+                memory = await asyncio.to_thread(self.archive.recent_digests, self.memory_days)
+                answer = await self.engine.ask(text, memory)
                 await self.brain.push(text[:60].replace("\n", " "))
             except Exception as error:  # доставляем боль владельцу, а не в лог-файл
                 log.exception("сорвалось на ответе")
