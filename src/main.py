@@ -27,6 +27,7 @@ from .brain import Brain
 from .digest import Digester
 from .engine import CoachEngine
 from .sessions import SessionStorage
+from .tidy_history import HistoryTidier
 from .voice import VoiceRecognizer
 
 logging.basicConfig(
@@ -82,6 +83,7 @@ class CoachBot:
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
         self.memory_days = int(env("MEMORY_DAYS", "30"))
         self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
+        self.tidier = HistoryTidier(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
 
@@ -215,6 +217,10 @@ class CoachBot:
                     await self.digester.make_month(yesterday)
 
                 await self.brain.push(f"выжимка за {yesterday.isoformat()}")
+
+                # История дня подписывается по-человечески той же моделью,
+                # что делала выжимку — сторож на маке для этого слишком туп и быстр.
+                await self.tidier.tidy(yesterday)
             except Exception:
                 log.exception("ночная выжимка сорвалась")
 
