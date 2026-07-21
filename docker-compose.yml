@@ -1,0 +1,30 @@
+services:
+  coach-bot:
+    build: .
+    container_name: coach-bot
+    restart: unless-stopped
+    mem_limit: 1g              # питон-поллер лёгкий, но процесс claude внутри тяжёлый
+    user: "1000:1000"
+    networks:
+      - xray                   # выход к api.anthropic.com и OpenAI через мост 172.18.0.1:1080
+    env_file:
+      - .env
+    environment:
+      - BRAIN_DIR=/brain
+      - STATE_DIR=/state
+      - PROMPT_FILE=/app/prompts/coach.md
+      - HOME=/home/coach
+    volumes:
+      - ./data/brain:/brain                        # клон coach-brain — общий мозг
+      - ./data/state:/state                        # закладка разговора (session_id)
+      - ./data/claude-config:/home/coach/.claude   # OAuth подписки, переживает рестарт
+      - ./data/ssh:/home/coach/.ssh:ro             # deploy-ключ для push в мозг
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  xray:
+    external: true
