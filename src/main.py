@@ -176,7 +176,7 @@ class CoachBot:
         await update.message.reply_text(
             "Я на связи. Наговаривай или пиши — разберём дела.\n"
             "Пингую утром в 10:00 и вечером в 20:00.\n"
-            "/новый — начать разговор с чистого листа."
+            "/new — начать разговор с чистого листа."
         )
 
     async def on_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -219,7 +219,8 @@ class CoachBot:
         application = Application.builder().token(env("TELEGRAM_BOT_TOKEN", required=True)).build()
 
         application.add_handler(CommandHandler("start", self.on_start))
-        application.add_handler(CommandHandler(["новый", "new", "reset"], self.on_reset))
+        # Telegram принимает только латиницу в командах — кириллические он отвергает
+        application.add_handler(CommandHandler(["new", "reset"], self.on_reset))
         application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, self.on_voice))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
