@@ -184,7 +184,10 @@ class CoachBot:
             return
         async with self.lock:
             self.engine.sessions.clear()
-        await update.message.reply_text("Начали с чистого листа. Память о тебе при этом никуда не делась.")
+        await update.message.reply_text(
+            "Начали с чистого листа. Всё сказанное сегодня сохранено — "
+            "ночью я перечитаю день целиком, вместе с этой частью."
+        )
 
     async def ping(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         prompt, channel = context.job.data
@@ -201,7 +204,9 @@ class CoachBot:
             yesterday = datetime.now(MOSCOW).date() - timedelta(days=1)
             try:
                 await self.brain.pull()
-                if session_id and await self.digester.make_day(session_id, yesterday):
+                # Выжимку делаем всегда: день целиком лежит в архиве, даже если
+                # ленту разговора сбросили через /new и session_id уже пуст.
+                if await self.digester.make_day(session_id, yesterday):
                     self.engine.sessions.clear()
 
                 if yesterday.weekday() == 6:  # воскресенье закрыло неделю
