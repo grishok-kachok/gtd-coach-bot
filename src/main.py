@@ -22,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 
+from .archive import Archive
 from .brain import Brain
 from .digest import Digester
 from .engine import CoachEngine
@@ -78,7 +79,8 @@ class CoachBot:
             api_key=env("OPENAI_API_KEY", required=True),
             proxy=env("HTTPS_PROXY") or None,
         )
-        self.digester = Digester(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
+        self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
+        self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
 
@@ -95,8 +97,11 @@ class CoachBot:
         log.warning("чужой стучится: id=%s", user.id if user else "?")
         return False
 
-    async def _think_and_reply(self, text: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _think_and_reply(
+        self, text: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, channel: str = "text"
+    ) -> None:
         async with self.lock:
+            await self.archive.add_message("vasiliy", channel, text, self.engine.sessions.load())
             typing = asyncio.create_task(self._keep_typing(chat_id, context))
             try:
                 await self.brain.pull()
@@ -107,6 +112,7 @@ class CoachBot:
                 answer = f"Сломался: {type(error).__name__}: {error}"
             finally:
                 typing.cancel()
+            await self.archive.add_message("coach", channel, answer, self.engine.sessions.load())
 
         for chunk in self._split(answer):
             await context.bot.send_message(chat_id=chat_id, text=chunk)
@@ -159,7 +165,7 @@ class CoachBot:
             return
 
         await context.bot.send_message(chat_id=chat_id, text=f"🎙 {text}")
-        await self._think_and_reply(text, chat_id, context)
+        await self._think_and_reply(text, chat_id, context, channel="voice")
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._mine(update):
@@ -178,8 +184,8 @@ class CoachBot:
         await update.message.reply_text("Начали с чистого листа. Память о тебе при этом никуда не делась.")
 
     async def ping(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        prompt = context.job.data
-        await self._think_and_reply(prompt, self.owner_id, context)
+        prompt, channel = context.job.data
+        await self._think_and_reply(prompt, self.owner_id, context, channel=channel)
 
     async def nightly_digest(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Ночью перечитать день, сложить конспект и начать разговор заново.
@@ -217,8 +223,8 @@ class CoachBot:
         queue = application.job_queue
         morning = env("MORNING_TIME", "10:00")
         evening = env("EVENING_TIME", "20:00")
-        queue.run_daily(self.ping, time=_parse(morning, MOSCOW), data=MORNING_PROMPT, name="утро")
-        queue.run_daily(self.ping, time=_parse(evening, MOSCOW), data=EVENING_PROMPT, name="вечер")
+        queue.run_daily(self.ping, time=_parse(morning, MOSCOW), data=(MORNING_PROMPT, "morning"), name="утро")
+        queue.run_daily(self.ping, time=_parse(evening, MOSCOW), data=(EVENING_PROMPT, "evening"), name="вечер")
         queue.run_daily(self.nightly_digest, time=_parse(env("DIGEST_TIME", "03:00"), MOSCOW), name="выжимка")
 
         log.info("коуч поднялся: пинги %s и %s по Москве, владелец %s", morning, evening, self.owner_id)

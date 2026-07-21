@@ -22,6 +22,8 @@ from claude_agent_sdk import (
     query,
 )
 
+from .archive import Archive
+
 log = logging.getLogger(__name__)
 
 DAY_PROMPT = """Ниже — стенограмма сегодняшнего разговора коуча с Василием.
@@ -66,8 +68,9 @@ class DigestPaths:
 
 
 class Digester:
-    def __init__(self, brain_dir: Path, model: str = "claude-fable-5") -> None:
+    def __init__(self, brain_dir: Path, archive: Archive, model: str = "claude-fable-5") -> None:
         self.brain_dir = brain_dir
+        self.archive = archive
         self.model = model
         self.paths = DigestPaths.under(brain_dir)
 
@@ -115,8 +118,19 @@ class Digester:
                 lines.append(f"{who}: {text}")
         return "\n\n".join(lines)
 
-    async def make_day(self, session_id: str, day: date) -> Path | None:
-        transcript = self._transcript(session_id)
+    def _transcript_from_archive(self, day: date) -> str:
+        lines = []
+        for role, channel, text in self.archive.messages_of_day(day.isoformat()):
+            who = "Василий" if role == "vasiliy" else "Коуч"
+            mark = " (голосом)" if channel == "voice" else ""
+            lines.append(f"{who}{mark}: {text}")
+        return "\n\n".join(lines)
+
+    async def make_day(self, session_id: str | None, day: date) -> Path | None:
+        # Архив — основной источник: он переживает и обнуление сессии, и пересборку контейнера.
+        transcript = self._transcript_from_archive(day)
+        if len(transcript) < 200 and session_id:
+            transcript = self._transcript(session_id)
         if len(transcript) < 200:
             log.info("за %s говорить не о чем — выжимку не делаю", day)
             return None
@@ -128,12 +142,15 @@ class Digester:
         self.paths.days.mkdir(parents=True, exist_ok=True)
         path = self.paths.days / f"{day.isoformat()}.md"
         path.write_text(f"# {day.isoformat()} — день\n\n{summary}\n", encoding="utf-8")
+        await self.archive.add_digest("day", day.isoformat(), summary)
         log.info("выжимка дня записана: %s", path)
         return path
 
     # --- укрупнение ---
 
-    async def _rollup(self, sources: list[Path], target: Path, title: str, period: str) -> Path | None:
+    async def _rollup(
+        self, sources: list[Path], target: Path, title: str, period: str, period_key: str
+    ) -> Path | None:
         if len(sources) < 2:
             return None
         body = "\n\n---\n\n".join(p.read_text(encoding="utf-8") for p in sorted(sources))
@@ -142,6 +159,7 @@ class Digester:
             return None
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f"# {title}\n\n{summary}\n", encoding="utf-8")
+        await self.archive.add_digest(period, period_key, summary)
         log.info("укрупнение записано: %s", target)
         return target
 
@@ -154,8 +172,9 @@ class Digester:
             if start.isoformat() <= path.stem <= week_end.isoformat()
         ] if self.paths.days.exists() else []
 
-        target = self.paths.weeks / f"{start.isoformat()}_{week_end.isoformat()}.md"
-        result = await self._rollup(days, target, f"Неделя {start} — {week_end}", "неделя")
+        key = f"{start.isoformat()}_{week_end.isoformat()}"
+        target = self.paths.weeks / f"{key}.md"
+        result = await self._rollup(days, target, f"Неделя {start} — {week_end}", "week", key)
         if result:
             for path in days:
                 path.unlink(missing_ok=True)
@@ -171,8 +190,9 @@ class Digester:
             if path.stem[:7] == prefix_start.isoformat()[:7]
         ] if self.paths.weeks.exists() else []
 
-        target = self.paths.months / f"{prefix_start.isoformat()[:7]}.md"
-        result = await self._rollup(weeks, target, f"Месяц {prefix_start.isoformat()[:7]}", "месяц")
+        key = prefix_start.isoformat()[:7]
+        target = self.paths.months / f"{key}.md"
+        result = await self._rollup(weeks, target, f"Месяц {key}", "month", key)
         if result:
             for path in weeks:
                 path.unlink(missing_ok=True)

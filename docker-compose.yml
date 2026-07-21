@@ -12,6 +12,7 @@ services:
     environment:
       - BRAIN_DIR=/brain
       - STATE_DIR=/state
+      - ARCHIVE_DB=/archive/coach.db
       - PROMPT_FILE=/app/prompts/coach.md
       - HOME=/home/coach
     volumes:
@@ -19,11 +20,15 @@ services:
       - ./data/state:/state                        # закладка разговора (session_id)
       - ./data/claude-config:/home/coach/.claude   # OAuth подписки, переживает рестарт
       - ./data/ssh:/home/coach/.ssh:ro             # deploy-ключ для push в мозг
+      - archive:/archive                           # сырьё разговоров + выжимки (в бэкапе по имени тома)
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  archive:
 
 networks:
   xray:
