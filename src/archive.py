@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role        TEXT NOT NULL,          -- vasiliy | coach
     channel     TEXT NOT NULL,          -- voice | text | morning | midday | evening
     text        TEXT NOT NULL,
-    source      TEXT NOT NULL DEFAULT 'telegram',  -- telegram | vscode
+    source      TEXT NOT NULL DEFAULT 'telegram',  -- telegram | laptop (ноутбук Василия)
     uuid        TEXT                    -- сквозной id из Claude Code, защита от дублей при импорте
 );
 CREATE INDEX IF NOT EXISTS messages_day ON messages(day);
@@ -61,6 +61,9 @@ class Archive:
         if "uuid" not in cols:
             db.execute("ALTER TABLE messages ADD COLUMN uuid TEXT")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_uuid ON messages(uuid)")
+        # Метка источника привязана к устройству, а не к программе: сегодня VS Code,
+        # завтра терминал — важно лишь, что это ноутбук, а не Telegram.
+        db.execute("UPDATE messages SET source='laptop' WHERE source='vscode'")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=30)
@@ -85,13 +88,13 @@ class Archive:
             log.exception("не смог записать сообщение в архив")
 
     def import_message(self, uuid: str, created_at_msk: datetime, role: str, text: str) -> bool:
-        """Импорт реплики из VS Code. Возвращает True, если строка новая (не дубль)."""
+        """Импорт реплики с ноутбука. Возвращает True, если строка новая (не дубль)."""
         with self._connect() as db:
             cur = db.execute(
                 "INSERT OR IGNORE INTO messages(day, created_at, session_id, role, channel, text, source, uuid) "
                 "VALUES(?,?,?,?,?,?,?,?)",
                 (created_at_msk.date().isoformat(), created_at_msk.isoformat(timespec="seconds"),
-                 None, role, "text", text, "vscode", uuid),
+                 None, role, "text", text, "laptop", uuid),
             )
             return cur.rowcount > 0
 
@@ -114,7 +117,7 @@ class Archive:
         """Сырьё за день: (роль, канал, источник, текст) в хронологии.
 
         Порядок по времени, а не по id: телеграм пишется вживую, а реплики из
-        VS Code доезжают пачкой с лагом в пару минут — по id диалог перемешался бы.
+        ноутбука доезжают пачкой с лагом в пару минут — по id диалог перемешался бы.
         """
         with self._connect() as db:
             rows = db.execute(

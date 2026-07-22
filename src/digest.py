@@ -123,8 +123,8 @@ class Digester:
         for role, channel, source, text in self.archive.messages_of_day(day.isoformat()):
             who = "Василий" if role == "vasiliy" else "Коуч"
             mark = " (голосом)" if channel == "voice" else ""
-            if source == "vscode":
-                mark = " (в VS Code)"
+            if source == "laptop":
+                mark = " (с ноутбука)"
             lines.append(f"{who}{mark}: {text}")
         return "\n\n".join(lines)
 
