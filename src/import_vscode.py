@@ -37,7 +37,7 @@ def main() -> None:
             role = str(item["role"])
             text = str(item["text"]).strip()
             ts = datetime.fromisoformat(str(item["ts"]).replace("Z", "+00:00")).astimezone(MOSCOW)
-        except (KeyError, ValueError):
+        except (KeyError, TypeError, ValueError):
             bad += 1
             continue
         if role not in ("vasiliy", "coach") or not text:
