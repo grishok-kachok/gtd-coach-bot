@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at  TEXT NOT NULL,
     session_id  TEXT,
     role        TEXT NOT NULL,          -- vasiliy | coach
-    channel     TEXT NOT NULL,          -- voice | text | morning | midday | evening
+    channel     TEXT NOT NULL,          -- voice | text | morning | midday | evening | nudge
     text        TEXT NOT NULL,
     source      TEXT NOT NULL DEFAULT 'telegram',  -- telegram | laptop (ноутбук Василия)
     uuid        TEXT                    -- сквозной id из Claude Code, защита от дублей при импорте
@@ -121,6 +121,23 @@ class Archive:
                 "SELECT role, channel, source, text FROM messages WHERE day=? ORDER BY created_at, id", (day,)
             ).fetchall()
         return [(row[0], row[1], row[2], row[3]) for row in rows]
+
+    def answered_since(self, moment: str) -> bool:
+        """Отозвался ли Василий после указанного момента (ISO-время с зоной).
+
+        Тексты крон-пингов лежат в архиве с ролью «vasiliy» — это инструкция коучу,
+        а не слова Василия, поэтому служебные каналы из выборки исключаем. Реплика
+        с ноутбука тоже считается ответом: если человек вживую работает в другом
+        окне, дёргать его «приём-приём» в телеграме — верный способ приучить
+        пролистывать наши сообщения.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM messages WHERE role='vasiliy' AND created_at>? "
+                "AND channel NOT IN ('morning','midday','evening','nudge') LIMIT 1",
+                (moment,),
+            ).fetchone()
+        return row is not None
 
     def recent_digests(self, days: int = 30) -> str:
         """Память для начала нового разговора: дни за последний месяц, а до них — недели и месяцы.

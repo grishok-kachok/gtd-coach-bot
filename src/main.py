@@ -68,6 +68,20 @@ EVENING_PROMPT = (
     "записано и голову можно освободить."
 )
 
+# Дожим: Василий не отозвался на чек-ин. Внешняя ответственность не работает, если
+# от неё можно молча отвернуться, — но и долбить нельзя, иначе пролистывать начнут
+# всё подряд. Отсюда три попытки, каждая другой по характеру, и тишина после отбоя.
+FOLLOWUP_PROMPTS = (
+    "Василий не ответил на прошлый чек-ин — прошло полчаса. Достучись: коротко, "
+    "тепло, с юмором, без укора и без повторения того, что уже написал. Одна-две "
+    "строки, один вопрос. Смысл: «ты тут? я на связи».",
+    "Василий молчит второй раз подряд — это последняя попытка достучаться сегодня, "
+    "больше сегодня по этому поводу не пишешь. Смени подход: не спрашивай «как дела», "
+    "а поставь что-то на кон или назови вслух то, что видишь (например, что задача "
+    "стоит на месте второй день). Коротко и цепко, чтобы захотелось ответить. "
+    "В конце дай понять, что отстаёшь и ждёшь его хода."
+)
+
 
 def env(name: str, default: str | None = None, required: bool = False) -> str:
     value = os.environ.get(name, default or "")
@@ -97,6 +111,8 @@ class CoachBot:
         )
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
         self.memory_days = int(env("MEMORY_DAYS", "30"))
+        self.followup_minutes = int(env("FOLLOWUP_MINUTES", "30"))
+        self.quiet_hour = int(env("QUIET_HOUR", "23"))  # после этого часа не дожимаем
         self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
         self.tidier = HistoryTidier(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
@@ -192,7 +208,7 @@ class CoachBot:
             return
         await update.message.reply_text(
             "Я на связи. Наговаривай или пиши — разберём дела.\n"
-            "Пингую утром в 10:00 и вечером в 20:00.\n"
+            "Пингую утром в 10:00, днём в 14:30 и вечером в 20:00.\n"
             "/new — начать разговор с чистого листа."
         )
 
@@ -208,7 +224,39 @@ class CoachBot:
 
     async def ping(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         prompt, channel = context.job.data
+        sent_at = datetime.now(MOSCOW).isoformat(timespec="seconds")
         await self._think_and_reply(prompt, self.owner_id, context, channel=channel)
+        self._schedule_followup(context, sent_at, attempt=1)
+
+    def _schedule_followup(self, context: ContextTypes.DEFAULT_TYPE, sent_at: str, attempt: int) -> None:
+        """Завести следующую попытку достучаться, если она ещё в запасе."""
+        if attempt > len(FOLLOWUP_PROMPTS):
+            return
+        context.job_queue.run_once(
+            self.follow_up,
+            when=timedelta(minutes=self.followup_minutes),
+            data=(sent_at, attempt),
+            name=f"дожим-{attempt}",
+        )
+
+    async def follow_up(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Василий не отозвался на чек-ин — попробовать ещё раз, иначе отступить.
+
+        Проверяем факт по архиву, а не по флагу в памяти: бот мог быть перезапущен,
+        а ответ мог прийти любым каналом.
+        """
+        sent_at, attempt = context.job.data
+        if await asyncio.to_thread(self.archive.answered_since, sent_at):
+            log.info("дожим %s не нужен: Василий отозвался", attempt)
+            return
+        now = datetime.now(MOSCOW)
+        if now.hour >= self.quiet_hour or now.hour < 8:
+            log.info("дожим %s отменён: время тихое (%s)", attempt, now.strftime("%H:%M"))
+            return
+        await self._think_and_reply(
+            FOLLOWUP_PROMPTS[attempt - 1], self.owner_id, context, channel="nudge"
+        )
+        self._schedule_followup(context, sent_at, attempt + 1)
 
     async def nightly_digest(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Ночью перечитать день, сложить конспект и начать разговор заново.
