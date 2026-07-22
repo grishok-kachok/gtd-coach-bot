@@ -26,10 +26,13 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at  TEXT NOT NULL,
     session_id  TEXT,
     role        TEXT NOT NULL,          -- vasiliy | coach
-    channel     TEXT NOT NULL,          -- voice | text | morning | evening
-    text        TEXT NOT NULL
+    channel     TEXT NOT NULL,          -- voice | text | morning | midday | evening
+    text        TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'telegram',  -- telegram | vscode
+    uuid        TEXT                    -- сквозной id из Claude Code, защита от дублей при импорте
 );
 CREATE INDEX IF NOT EXISTS messages_day ON messages(day);
+CREATE UNIQUE INDEX IF NOT EXISTS messages_uuid ON messages(uuid);
 
 CREATE TABLE IF NOT EXISTS digests (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,6 +51,16 @@ class Archive:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.executescript(SCHEMA)
+            self._migrate(db)
+
+    def _migrate(self, db: sqlite3.Connection) -> None:
+        """Дотягиваем живую базу до свежей схемы: только добавляющие правки, ничего не теряем."""
+        cols = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+        if "source" not in cols:
+            db.execute("ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'telegram'")
+        if "uuid" not in cols:
+            db.execute("ALTER TABLE messages ADD COLUMN uuid TEXT")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_uuid ON messages(uuid)")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=30)
@@ -63,12 +76,24 @@ class Archive:
         try:
             with self._connect() as db:
                 db.execute(
-                    "INSERT INTO messages(day, created_at, session_id, role, channel, text) "
-                    "VALUES(?,?,?,?,?,?)",
-                    (now.date().isoformat(), now.isoformat(timespec="seconds"), session_id, role, channel, text),
+                    "INSERT INTO messages(day, created_at, session_id, role, channel, text, source, uuid) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (now.date().isoformat(), now.isoformat(timespec="seconds"), session_id, role, channel, text,
+                     "telegram", None),
                 )
         except sqlite3.Error:
             log.exception("не смог записать сообщение в архив")
+
+    def import_message(self, uuid: str, created_at_msk: datetime, role: str, text: str) -> bool:
+        """Импорт реплики из VS Code. Возвращает True, если строка новая (не дубль)."""
+        with self._connect() as db:
+            cur = db.execute(
+                "INSERT OR IGNORE INTO messages(day, created_at, session_id, role, channel, text, source, uuid) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (created_at_msk.date().isoformat(), created_at_msk.isoformat(timespec="seconds"),
+                 None, role, "text", text, "vscode", uuid),
+            )
+            return cur.rowcount > 0
 
     async def add_digest(self, period: str, period_key: str, text: str) -> None:
         await asyncio.to_thread(self._add_digest, period, period_key, text)
@@ -85,13 +110,17 @@ class Archive:
         except sqlite3.Error:
             log.exception("не смог записать выжимку в архив")
 
-    def messages_of_day(self, day: str) -> list[tuple[str, str, str]]:
-        """Сырьё за день: (роль, канал, текст) по порядку."""
+    def messages_of_day(self, day: str) -> list[tuple[str, str, str, str]]:
+        """Сырьё за день: (роль, канал, источник, текст) в хронологии.
+
+        Порядок по времени, а не по id: телеграм пишется вживую, а реплики из
+        VS Code доезжают пачкой с лагом в пару минут — по id диалог перемешался бы.
+        """
         with self._connect() as db:
             rows = db.execute(
-                "SELECT role, channel, text FROM messages WHERE day=? ORDER BY id", (day,)
+                "SELECT role, channel, source, text FROM messages WHERE day=? ORDER BY created_at, id", (day,)
             ).fetchall()
-        return [(row[0], row[1], row[2]) for row in rows]
+        return [(row[0], row[1], row[2], row[3]) for row in rows]
 
     def recent_digests(self, days: int = 30) -> str:
         """Память для начала нового разговора: дни за последний месяц, а до них — недели и месяцы.
