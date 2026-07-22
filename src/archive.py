@@ -61,9 +61,6 @@ class Archive:
         if "uuid" not in cols:
             db.execute("ALTER TABLE messages ADD COLUMN uuid TEXT")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_uuid ON messages(uuid)")
-        # Метка источника привязана к устройству, а не к программе: сегодня VS Code,
-        # завтра терминал — важно лишь, что это ноутбук, а не Telegram.
-        db.execute("UPDATE messages SET source='laptop' WHERE source='vscode'")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=30)
