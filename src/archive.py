@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS messages (
     uuid        TEXT                    -- сквозной id из Claude Code, защита от дублей при импорте
 );
 CREATE INDEX IF NOT EXISTS messages_day ON messages(day);
-CREATE UNIQUE INDEX IF NOT EXISTS messages_uuid ON messages(uuid);
+-- индекс по uuid создаётся в _migrate: на живой базе колонки ещё нет в этот момент
 
 CREATE TABLE IF NOT EXISTS digests (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
