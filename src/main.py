@@ -39,6 +39,9 @@ log = logging.getLogger("coach")
 
 TELEGRAM_LIMIT = 4000
 MOSCOW = ZoneInfo("Europe/Moscow")
+# Отметка живости для docker healthcheck. В /tmp, а не в /state: это одноразовое
+# состояние процесса, ему нечего делать в бэкапе вместе с закладкой разговора.
+HEARTBEAT_FILE = Path(os.environ.get("HEARTBEAT_FILE", "/tmp/coach-heartbeat"))
 
 MORNING_PROMPT = (
     "Наступило утро — время утреннего чек-ина. Перед тем как писать: загляни в "
@@ -236,6 +239,20 @@ class CoachBot:
             except Exception:
                 log.exception("ночная выжимка сорвалась")
 
+    # --- пульс ---
+
+    async def heartbeat(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Отметка «рабочий цикл жив» для docker healthcheck (src/healthcheck.py).
+
+        Задача крутится в том же asyncio-цикле, что и поллинг Telegram: встанет
+        цикл — перестанет обновляться и файл. Наружу бот ничего не слушает,
+        поэтому другого дешёвого признака живости у него нет.
+        """
+        try:
+            HEARTBEAT_FILE.write_text(datetime.now(MOSCOW).isoformat(timespec="seconds"))
+        except OSError:
+            log.exception("не смог записать пульс в %s", HEARTBEAT_FILE)
+
     # --- запуск ---
 
     def run(self) -> None:
@@ -255,6 +272,7 @@ class CoachBot:
         queue.run_daily(self.ping, time=_parse(midday, MOSCOW), data=(MIDDAY_PROMPT, "midday"), name="день")
         queue.run_daily(self.ping, time=_parse(evening, MOSCOW), data=(EVENING_PROMPT, "evening"), name="вечер")
         queue.run_daily(self.nightly_digest, time=_parse(env("DIGEST_TIME", "03:00"), MOSCOW), name="выжимка")
+        queue.run_repeating(self.heartbeat, interval=60, first=1, name="пульс")
 
         log.info("коуч поднялся: пинги %s, %s и %s по Москве, владелец %s", morning, midday, evening, self.owner_id)
         # Вебхуки в РФ не годятся — Telegram их не достучится, работаем поллингом.

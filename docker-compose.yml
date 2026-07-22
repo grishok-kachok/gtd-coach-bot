@@ -21,6 +21,15 @@ services:
       - ./data/claude-config:/home/coach/.claude   # OAuth подписки, переживает рестарт
       - ./data/ssh:/home/coach/.ssh:ro             # deploy-ключ для push в мозг
       - archive:/archive                           # сырьё разговоров + выжимки (в бэкапе по имени тома)
+    # Живость поллера: свежесть пульса главного цикла + ответ Telegram через прокси.
+    # Подробности и обоснование — в src/healthcheck.py. Красный healthcheck сам
+    # доезжает до владельца: хостовый сторож check-containers.sh шлёт алерт в Telegram.
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.healthcheck"]
+      interval: 120s
+      timeout: 25s
+      retries: 3
+      start_period: 90s        # первый пульс — через секунду после старта, но образ тяжёлый
     logging:
       driver: json-file
       options:

@@ -60,10 +60,31 @@ docker compose logs -f
 
 ## Обслуживание
 
+Код правится **только на ноутбуке** и приезжает на сервер через GitHub:
+ноутбук → `git push` → на сервере `git pull`. Клон `/opt/apps/coach-bot` —
+цель выкатки, а не источник правды: его deploy-ключ read-only, а хук `pre-commit`
+там отклоняет коммиты. Так на сервере физически не может завестись версия кода,
+которой нет больше нигде.
+
 ```bash
 docker compose logs -f --tail=100    # что происходит
 docker compose restart               # разговор не теряется — session_id на диске
-docker compose up -d --build         # выкатить изменения
+git pull && /opt/infra/scripts/host/with-build-lock.sh docker compose up -d --build
+```
+
+Сборку — только через `with-build-lock.sh`: две параллельные сборки на этом
+хосте роняли демон Docker.
+
+### Здоровье
+
+`docker ps` показывает у контейнера `healthy` / `unhealthy`. Проверка —
+`src/healthcheck.py`: свежесть пульса главного цикла (`/tmp/coach-heartbeat`,
+обновляется раз в минуту) плюс живой ответ Telegram через прокси. Красный статус
+сам доезжает до владельца — хостовый сторож `check-containers.sh` шлёт алерт в
+Telegram. Посмотреть причину:
+
+```bash
+docker inspect --format '{{json .State.Health}}' coach-bot | python3 -m json.tool
 ```
 
 Команды в чате: `/start` — проверка связи, `/new` — начать разговор с чистого
