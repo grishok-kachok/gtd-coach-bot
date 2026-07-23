@@ -5,9 +5,12 @@
   открыть TodoistClient(token) → позвать функцию-«кнопку» → обернуть её str
   в MCP-ответ {"content":[{"type":"text","text":...}]}.
 
-Так одно ядро служит и боту (этот файл), и MCP-серверу на ноутбуке. Ядро —
-вендоренная копия (см. src/coach_todoist_mcp/__init__.py); на этапе 07 станет
-обычной зависимостью.
+Так одно ядро служит и боту (этот файл), и MCP-серверу на ноутбуке.
+
+Один дом кода: пакет `coach_todoist_mcp` не копируется в этот репозиторий —
+он приезжает из отдельного репо vefmvai/coach-todoist-mcp. На сервере его клон
+`/opt/apps/coach-todoist-mcp` монтируется в контейнер как /opt/pkg и попадает
+в PYTHONPATH (см. docker-compose.yml). Поэтому импорт — обычный абсолютный.
 
 Пометки авторства вшиты в ядро: закрытие задачи по умолчанию оставляет
 комментарий «закрыта Claude со слов Василия»; создание метит по флагу authorship.
@@ -22,9 +25,8 @@ import logging
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
-
-from .coach_todoist_mcp import core
-from .coach_todoist_mcp.client import TodoistClient, TodoistError
+from coach_todoist_mcp import core
+from coach_todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 
