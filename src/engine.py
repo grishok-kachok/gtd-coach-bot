@@ -17,6 +17,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
+from .gcal import build_calendar_server
 from .sessions import SessionStorage
 from .todoist import build_todoist_server
 
@@ -37,6 +38,7 @@ class CoachEngine:
         todoist_token: str,
         model: str,
         effort: str = "medium",
+        calendar: dict | None = None,
     ) -> None:
         self.brain_dir = brain_dir
         self.sessions = session_storage
@@ -44,8 +46,15 @@ class CoachEngine:
         self.model = model
         self.effort = effort
         self.todoist_server = build_todoist_server(todoist_token)
+        # Календарь подключаем только когда заданы креды — без них бот работает как прежде.
+        self.calendar_server = build_calendar_server(**calendar) if calendar else None
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:
+        mcp_servers = {"todoist": self.todoist_server}
+        allowed = MEMORY_TOOLS + ["mcp__todoist"]
+        if self.calendar_server is not None:
+            mcp_servers["calendar"] = self.calendar_server
+            allowed = allowed + ["mcp__calendar"]
         return ClaudeAgentOptions(
             system_prompt=self.system_prompt,
             cwd=str(self.brain_dir),
@@ -53,8 +62,8 @@ class CoachEngine:
             effort=self.effort,
             resume=resume,
             permission_mode="bypassPermissions",
-            mcp_servers={"todoist": self.todoist_server},
-            allowed_tools=MEMORY_TOOLS + ["mcp__todoist"],
+            mcp_servers=mcp_servers,
+            allowed_tools=allowed,
             setting_sources=["project"],
         )
 

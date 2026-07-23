@@ -104,6 +104,7 @@ class CoachBot:
             todoist_token=env("TODOIST_API_TOKEN", required=True),
             model=env("COACH_MODEL", "claude-fable-5"),
             effort=env("COACH_EFFORT", "medium"),
+            calendar=self._calendar_config(),
         )
         self.voice = VoiceRecognizer(
             api_key=env("OPENAI_API_KEY", required=True),
@@ -121,6 +122,28 @@ class CoachBot:
     def _system_prompt(self) -> str:
         path = Path(env("PROMPT_FILE", "/app/prompts/coach.md"))
         return path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _calendar_config() -> dict | None:
+        """Google-календарь подключаем, только если заданы все три секрета.
+
+        Часовой пояс настраиваемый: с сентября владелец переезжает на Бали —
+        поменяется одна переменная COACH_TZ. Выход к Google — через тот же
+        Xray-мост, что у Whisper (Google в РФ блокируется)."""
+        client_id = env("GOOGLE_CLIENT_ID")
+        client_secret = env("GOOGLE_CLIENT_SECRET")
+        refresh_token = env("GOOGLE_REFRESH_TOKEN")
+        if not (client_id and client_secret and refresh_token):
+            log.warning("Google-календарь не подключён: не заданы GOOGLE_* переменные")
+            return None
+        return {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "calendar_id": env("GOOGLE_CALENDAR_ID", "primary"),
+            "tz": env("COACH_TZ", "Europe/Moscow"),
+            "proxy": env("HTTPS_PROXY") or None,
+        }
 
     # --- вспомогательное ---
 
