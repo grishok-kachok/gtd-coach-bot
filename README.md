@@ -13,7 +13,7 @@
 | `src/main.py` | Телеграм: поллинг, голос, два пинга в день, ночная выжимка |
 | `src/engine.py` | **Движок**: Claude Agent SDK, непрерывная сессия, инструменты |
 | `src/sessions.py` | Закладка разговора — какой `session_id` продолжать |
-| `src/todoist.py` | Инструменты Todoist (REST v1) с пометкой авторства |
+| `src/todoist.py` | Инструменты Todoist — обёртки над ядром `coach_todoist_mcp` |
 | `src/voice.py` | Расшифровка голосовых (Whisper) |
 | `src/brain.py` | Синхронизация памяти через git |
 | `src/digest.py` | Ночная выжимка: день → неделя → месяц |

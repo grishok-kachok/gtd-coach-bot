@@ -1,7 +1,7 @@
 """Инструменты Todoist для коуча — тонкие MCP-обёртки над ядром coach-todoist-mcp.
 
-Вся логика (запросы к Todoist unified API v1, сборка человекочитаемого текста,
-пометки авторства) живёт в `.coach_todoist_mcp.core`. Здесь только:
+Вся логика (запросы к Todoist unified API v1, сборка человекочитаемого текста)
+живёт в `.coach_todoist_mcp.core`. Здесь только:
   открыть TodoistClient(token) → позвать функцию-«кнопку» → обернуть её str
   в MCP-ответ {"content":[{"type":"text","text":...}]}.
 
@@ -12,8 +12,8 @@
 `/opt/apps/coach-todoist-mcp` монтируется в контейнер как /opt/pkg и попадает
 в PYTHONPATH (см. docker-compose.yml). Поэтому импорт — обычный абсолютный.
 
-Пометки авторства вшиты в ядро: закрытие задачи по умолчанию оставляет
-комментарий «закрыта Claude со слов Василия»; создание метит по флагу authorship.
+Комментарии-пометки авторства отменены решением владельца 23.07.2026: агент
+больше никогда не пишет «создана/закрыта Claude со слов Василия».
 Egress к Todoist из РФ — через Xray-мост: TodoistClient(trust_env=True) сам
 подхватывает HTTPS_PROXY из окружения контейнера (порт 1080).
 """
@@ -77,7 +77,8 @@ def build_todoist_server(token: str):
 
     @tool(
         "get_comments",
-        "Прочитать комментарии задачи по id (там же видны пометки авторства).",
+        "Прочитать комментарии задачи по id. В квадратных скобках — id самого "
+        "комментария, он нужен для delete_comment.",
         {"task_id": str},
     )
     async def get_comments(args: dict[str, Any]) -> dict[str, Any]:
@@ -118,12 +119,11 @@ def build_todoist_server(token: str):
         "Создать задачу (или подзадачу — через parent_id) в Todoist. Приоритет: "
         "4 — самый высокий (p1 в приложении), 1 — обычный. due_string — словами "
         "по-русски: «завтра», «в пятницу», «каждый пн». deadline_date — жёсткий "
-        "дедлайн YYYY-MM-DD. labels — через запятую. duration_minutes — оценка времени. "
-        "authorship=true пометит задачу «создана Claude со слов Василия».",
+        "дедлайн YYYY-MM-DD. labels — через запятую. duration_minutes — оценка времени.",
         {
             "content": str, "project_id": str, "section_id": str, "parent_id": str,
             "due_string": str, "deadline_date": str, "priority": int, "labels": str,
-            "description": str, "duration_minutes": int, "authorship": bool,
+            "description": str, "duration_minutes": int,
         },
     )
     async def add_task(args: dict[str, Any]) -> dict[str, Any]:
@@ -133,14 +133,14 @@ def build_todoist_server(token: str):
         if args.get("duration_minutes"):
             fields["duration"] = int(args["duration_minutes"])
             fields["duration_unit"] = "minute"
-        return await run(core.add_task, args["content"], authorship=args.get("authorship", False), **fields)
+        return await run(core.add_task, args["content"], **fields)
 
     @tool(
         "add_tasks_bulk",
         "Создать пачку задач за раз. tasks_json — JSON-массив объектов, каждый как "
         "у add_task: [{\"content\":\"...\",\"project_id\":\"...\",\"due_string\":\"завтра\"}, ...]. "
         "Удобно, когда крупное дело распадается на список подзадач.",
-        {"tasks_json": str, "authorship": bool},
+        {"tasks_json": str},
     )
     async def add_tasks_bulk(args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -149,7 +149,7 @@ def build_todoist_server(token: str):
             return ok(f"tasks_json не разобран как JSON-массив: {err}")
         if not isinstance(tasks, list):
             return ok("tasks_json должен быть JSON-массивом объектов.")
-        return await run(core.add_tasks_bulk, tasks, authorship=args.get("authorship", False))
+        return await run(core.add_tasks_bulk, tasks)
 
     @tool(
         "update_task",
@@ -172,8 +172,8 @@ def build_todoist_server(token: str):
 
     @tool(
         "complete_task",
-        "Закрыть задачу в Todoist со слов Василия (по умолчанию оставляет пометку "
-        "авторства). Чтобы, наоборот, вернуть ошибочно закрытую задачу — reopen=true.",
+        "Закрыть задачу в Todoist со слов Василия. Чтобы, наоборот, вернуть "
+        "ошибочно закрытую задачу — reopen=true.",
         {"task_id": str, "reopen": bool},
     )
     async def complete_task(args: dict[str, Any]) -> dict[str, Any]:
@@ -223,11 +223,26 @@ def build_todoist_server(token: str):
         return await run(core.add_comment, str(args["task_id"]), args["content"])
 
     @tool(
+        "delete_comment",
+        "Удалить комментарий задачи безвозвратно по его id (id виден в get_comments "
+        "и в get_task с include_comments=true). Необратимо, поэтому срабатывает "
+        "только с confirm=true.",
+        {"comment_id": str, "confirm": bool},
+    )
+    async def delete_comment(args: dict[str, Any]) -> dict[str, Any]:
+        return await run(core.delete_comment, str(args["comment_id"]), confirm=args.get("confirm", False))
+
+    @tool(
         "manage_structure",
-        "Создать элемент структуры Todoist. action: create_project | create_section | "
-        "create_label. Для секции нужен project_id; для вложенного проекта — parent_id. "
+        "Управление структурой Todoist. action: create_project | create_section | "
+        "create_label | rename_label | delete_label. name — имя проекта/секции/метки "
+        "(метку можно писать с @ или без, регистр не важен). Для секции нужен "
+        "project_id; для вложенного проекта — parent_id. rename_label: name — как "
+        "метка называется сейчас, new_name — как назвать. delete_label срабатывает "
+        "только с confirm=true и снимает метку со всех задач. "
         "Пользуйся редко и осознанно — структуру задаёт Василий.",
-        {"action": str, "name": str, "project_id": str, "parent_id": str},
+        {"action": str, "name": str, "project_id": str, "parent_id": str,
+         "new_name": str, "confirm": bool},
     )
     async def manage_structure(args: dict[str, Any]) -> dict[str, Any]:
         return await run(
@@ -236,14 +251,16 @@ def build_todoist_server(token: str):
             args["name"],
             project_id=args.get("project_id") or None,
             parent_id=args.get("parent_id") or None,
+            new_name=args.get("new_name") or None,
+            confirm=args.get("confirm", False),
         )
 
     return create_sdk_mcp_server(
         name="todoist",
-        version="2.0.0",
+        version="2.1.0",
         tools=[
             find_tasks, get_task, get_comments, get_structure, completed_history,
             add_task, add_tasks_bulk, update_task, complete_task, move_task,
-            delete_task, quick_add, add_comment, manage_structure,
+            delete_task, quick_add, add_comment, delete_comment, manage_structure,
         ],
     )
