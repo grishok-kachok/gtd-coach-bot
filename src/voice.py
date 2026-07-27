@@ -40,7 +40,16 @@ class VoiceRecognizer:
         self.model = model
         self.url = url
 
-    async def transcribe(self, audio: bytes, filename: str = "voice.oga") -> str:
+    async def transcribe(self, audio: bytes, filename: str = "voice.ogg") -> str:
+        # ⚠️ Groq определяет формат ПО РАСШИРЕНИЮ ИМЕНИ, а не по содержимому, и `.oga`
+        # в его списке нет: [flac mp3 mp4 mpeg mpga m4a ogg opus wav webm]. Telegram
+        # отдаёт голосовые именно как `.oga` — OpenAI это принимал, Groq отвечает
+        # 400 «file must be one of the following types». Файл при этом валидный:
+        # тот же байт-в-байт под именем `.ogg` распознаётся идеально (проверено 2026-07-27).
+        # Поэтому нормализуем расширение перед отправкой.
+        if filename.lower().endswith(".oga"):
+            filename = filename[:-4] + ".ogg"
+
         async with httpx.AsyncClient(timeout=120, proxy=self.proxy) as http:
             response = await http.post(
                 self.url,
