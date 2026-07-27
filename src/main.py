@@ -28,7 +28,7 @@ from .digest import Digester
 from .engine import CoachEngine
 from .sessions import SessionStorage
 from .tidy_history import HistoryTidier
-from .voice import VoiceRecognizer
+from .voice import DEFAULT_STT_MODEL, DEFAULT_STT_URL, OPENAI_STT_URL, VoiceRecognizer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -106,9 +106,15 @@ class CoachBot:
             effort=env("COACH_EFFORT", "medium"),
             calendar=self._calendar_config(),
         )
+        # Распознавание речи: с 2026-07-27 через Groq (тот же Whisper, ~9x дешевле).
+        # STT_API_KEY не задан -> откат на OPENAI_API_KEY и старый адрес, чтобы бот
+        # не упал на сервере, где .env ещё не обновлён.
+        stt_key = env("STT_API_KEY")
         self.voice = VoiceRecognizer(
-            api_key=env("OPENAI_API_KEY", required=True),
+            api_key=stt_key or env("OPENAI_API_KEY", required=True),
             proxy=env("HTTPS_PROXY") or None,
+            model=env("STT_MODEL", DEFAULT_STT_MODEL if stt_key else "whisper-1"),
+            url=env("STT_API_URL", DEFAULT_STT_URL if stt_key else OPENAI_STT_URL),
         )
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
         self.memory_days = int(env("MEMORY_DAYS", "30"))
