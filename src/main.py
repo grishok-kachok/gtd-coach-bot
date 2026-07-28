@@ -26,9 +26,17 @@ from .archive import Archive
 from .brain import Brain
 from .digest import Digester
 from .engine import CoachEngine
+from .retry import retry_network
 from .sessions import SessionStorage
 from .tidy_history import HistoryTidier
-from .voice import DEFAULT_STT_MODEL, DEFAULT_STT_URL, OPENAI_STT_URL, VoiceRecognizer
+from .voice import (
+    DEFAULT_STT_MODEL,
+    DEFAULT_STT_URL,
+    OPENAI_STT_MODEL,
+    OPENAI_STT_URL,
+    Service,
+    VoiceRecognizer,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -106,16 +114,7 @@ class CoachBot:
             effort=env("COACH_EFFORT", "medium"),
             calendar=self._calendar_config(),
         )
-        # Распознавание речи: с 2026-07-27 через Groq (тот же Whisper, ~9x дешевле).
-        # STT_API_KEY не задан -> откат на OPENAI_API_KEY и старый адрес, чтобы бот
-        # не упал на сервере, где .env ещё не обновлён.
-        stt_key = env("STT_API_KEY")
-        self.voice = VoiceRecognizer(
-            api_key=stt_key or env("OPENAI_API_KEY", required=True),
-            proxy=env("HTTPS_PROXY") or None,
-            model=env("STT_MODEL", DEFAULT_STT_MODEL if stt_key else "whisper-1"),
-            url=env("STT_API_URL", DEFAULT_STT_URL if stt_key else OPENAI_STT_URL),
-        )
+        self.voice = self._voice_recognizer()
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
         self.memory_days = int(env("MEMORY_DAYS", "30"))
         self.followup_minutes = int(env("FOLLOWUP_MINUTES", "30"))
@@ -124,6 +123,43 @@ class CoachBot:
         self.tidier = HistoryTidier(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
+
+    @staticmethod
+    def _voice_recognizer() -> VoiceRecognizer:
+        """Основной сервис расшифровки — Groq (дешёвый), запасной — OpenAI.
+
+        Если STT_API_KEY не задан (сервер со старым .env), основным становится
+        OpenAI и запасного нет — бот всё равно поднимется и будет слышать голос.
+        """
+        proxy = env("HTTPS_PROXY") or None
+        groq_key = env("STT_API_KEY")
+        openai_key = env("OPENAI_API_KEY")
+        if not (groq_key or openai_key):
+            raise RuntimeError("нет ни STT_API_KEY, ни OPENAI_API_KEY — расшифровывать нечем")
+
+        openai = (
+            Service(
+                name="OpenAI",
+                api_key=openai_key,
+                url=env("FALLBACK_STT_API_URL", OPENAI_STT_URL),
+                model=env("FALLBACK_STT_MODEL", OPENAI_STT_MODEL),
+            )
+            if openai_key
+            else None
+        )
+        if not groq_key:
+            log.warning("STT_API_KEY не задан: расшифровка только через OpenAI, без запасного")
+            return VoiceRecognizer(primary=openai, proxy=proxy)
+
+        primary = Service(
+            name="Groq",
+            api_key=groq_key,
+            url=env("STT_API_URL", DEFAULT_STT_URL),
+            model=env("STT_MODEL", DEFAULT_STT_MODEL),
+        )
+        if openai is None:
+            log.warning("OPENAI_API_KEY не задан: у расшифровки нет запасного сервиса")
+        return VoiceRecognizer(primary=primary, fallback=openai, proxy=proxy)
 
     def _system_prompt(self) -> str:
         path = Path(env("PROMPT_FILE", "/app/prompts/coach.md"))
@@ -216,14 +252,48 @@ class CoachBot:
         chat_id = update.effective_chat.id
         message = update.message
         source = message.voice or message.audio or message.video_note
+
+        # Путь голосового целиком идёт через Xray-мост: и скачивание из Telegram,
+        # и расшифровка. Мост моргает — повторяем каждый шаг (см. retry.py).
+        # Первые сбои проходят молча, но если возня затянулась — говорим об этом,
+        # чтобы владелец не смотрел в тишину.
+        warned = False
+
+        async def warn(attempt: int, error: BaseException) -> None:
+            nonlocal warned
+            if warned or attempt < 3:
+                return
+            warned = True
+            await context.bot.send_message(
+                chat_id=chat_id, text="Связь шалит, пробую разобрать ещё раз — подожди."
+            )
+
+        async def switched(failed: str, taken: str) -> None:
+            await context.bot.send_message(
+                chat_id=chat_id, text=f"{failed} не отвечает — расшифровываю через {taken}."
+            )
+
+        typing = asyncio.create_task(self._keep_typing(chat_id, context))
         try:
-            telegram_file = await context.bot.get_file(source.file_id)
-            audio = bytes(await telegram_file.download_as_bytearray())
-            text = await self.voice.transcribe(audio)
+            telegram_file = await retry_network(
+                lambda: context.bot.get_file(source.file_id),
+                what="получение ссылки на голосовое",
+                on_retry=warn,
+            )
+            audio = bytes(
+                await retry_network(
+                    lambda: telegram_file.download_as_bytearray(),
+                    what="скачивание голосового",
+                    on_retry=warn,
+                )
+            )
+            text = await self.voice.transcribe(audio, on_retry=warn, on_switch=switched)
         except Exception as error:
             log.exception("расшифровка не удалась")
             await context.bot.send_message(chat_id=chat_id, text=f"Не разобрал голос: {error}")
             return
+        finally:
+            typing.cancel()
 
         if not text:
             await context.bot.send_message(chat_id=chat_id, text="Тишина — ничего не разобрал.")
