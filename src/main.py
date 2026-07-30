@@ -50,6 +50,13 @@ MOSCOW = ZoneInfo("Europe/Moscow")
 # Отметка живости для docker healthcheck. В /tmp, а не в /state: это одноразовое
 # состояние процесса, ему нечего делать в бэкапе вместе с закладкой разговора.
 HEARTBEAT_FILE = Path(os.environ.get("HEARTBEAT_FILE", "/tmp/coach-heartbeat"))
+# Куда кладём присланные картинки, чтобы коуч открыл их инструментом Read.
+# В /tmp, а не в /brain и не в /state: файл нужен ровно на один ответ. В мозге
+# он попал бы в git, в состоянии — в бэкап. После ответа файл удаляем.
+PHOTOS_DIR = Path(os.environ.get("PHOTOS_DIR", "/tmp/coach-photos"))
+# Что Read умеет показать как изображение. Присланное иным форматом (heic и
+# прочая экзотика) не притворяемся, что видим, — честно говорим владельцу.
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 MORNING_PROMPT = (
     "Наступило утро — время утреннего чек-ина. Перед тем как писать: загляни в "
@@ -113,7 +120,9 @@ class CoachBot:
             model=env("COACH_MODEL", "claude-fable-5"),
             effort=env("COACH_EFFORT", "medium"),
             calendar=self._calendar_config(),
+            extra_dirs=[PHOTOS_DIR],
         )
+        PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         self.voice = self._voice_recognizer()
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
         self.memory_days = int(env("MEMORY_DAYS", "30"))
@@ -197,10 +206,23 @@ class CoachBot:
         return False
 
     async def _think_and_reply(
-        self, text: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, channel: str = "text"
+        self,
+        text: str,
+        chat_id: int,
+        context: ContextTypes.DEFAULT_TYPE,
+        channel: str = "text",
+        archived_as: str | None = None,
     ) -> None:
+        """Отдать реплику движку и ответить владельцу.
+
+        `archived_as` нужен там, где движку уходит служебная обёртка, а в журнал
+        должно лечь человеческое: у картинки в промпте путь к файлу, читать его
+        в ночной выжимке незачем.
+        """
         async with self.lock:
-            await self.archive.add_message("vasiliy", channel, text, self.engine.sessions.load())
+            await self.archive.add_message(
+                "vasiliy", channel, archived_as or text, self.engine.sessions.load()
+            )
             typing = asyncio.create_task(self._keep_typing(chat_id, context))
             try:
                 await self.brain.pull()
@@ -301,6 +323,116 @@ class CoachBot:
 
         await context.bot.send_message(chat_id=chat_id, text=f"🎙 {text}")
         await self._think_and_reply(text, chat_id, context, channel="voice")
+
+    @staticmethod
+    def _image_source(message) -> tuple[object | None, str]:
+        """Что прислали: сжатое фото или картинку файлом.
+
+        У фото Telegram отдаёт лесенку размеров — берём последний, самый крупный:
+        коучу нужны детали, а не превью.
+        """
+        if message.photo:
+            return message.photo[-1], ".jpg"
+        document = message.document
+        if document and (document.mime_type or "").startswith("image/"):
+            return document, Path(document.file_name or "").suffix.lower()
+        return None, ""
+
+    async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Картинка: кладём во временный файл и показываем коучу через Read.
+
+        Зрение у бота не своё, а движка: инструмент Read у Claude Code открывает
+        изображения и видит их. Поэтому работа телеграм-слоя простая — положить
+        файл на диск, назвать путь и убрать за собой.
+
+        Альбом из нескольких картинок Telegram присылает отдельными сообщениями,
+        поэтому каждая разбирается своим ходом — связать их в одну мысль коуч
+        может только по подписям.
+        """
+        if not self._mine(update):
+            return
+        chat_id = update.effective_chat.id
+        message = update.message
+        source, suffix = self._image_source(message)
+        if source is None:
+            return
+        if suffix not in IMAGE_SUFFIXES:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Формат «{suffix or 'без расширения'}» я разглядеть не смогу. "
+                "Пришли jpg, png, gif или webp — или обычным фото, без файла.",
+            )
+            return
+
+        # Путь картинки, как и путь голосового, идёт через Xray-мост: мост моргает —
+        # повторяем шаг (см. retry.py). Молчим, пока возня короткая.
+        warned = False
+
+        async def warn(attempt: int, error: BaseException) -> None:
+            nonlocal warned
+            if warned or attempt < 3:
+                return
+            warned = True
+            await context.bot.send_message(
+                chat_id=chat_id, text="Связь шалит, пробую забрать картинку ещё раз — подожди."
+            )
+
+        typing = asyncio.create_task(self._keep_typing(chat_id, context))
+        try:
+            telegram_file = await retry_network(
+                lambda: context.bot.get_file(source.file_id),
+                what="получение ссылки на картинку",
+                on_retry=warn,
+            )
+            picture = bytes(
+                await retry_network(
+                    lambda: telegram_file.download_as_bytearray(),
+                    what="скачивание картинки",
+                    on_retry=warn,
+                )
+            )
+        except Exception as error:
+            log.exception("картинка не скачалась")
+            await context.bot.send_message(chat_id=chat_id, text=f"Не забрал картинку: {error}")
+            return
+        finally:
+            typing.cancel()
+
+        PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+        path = PHOTOS_DIR / f"{update.update_id}{suffix}"
+        await asyncio.to_thread(path.write_bytes, picture)
+
+        caption = (message.caption or "").strip()
+        prompt = (
+            f"Василий прислал картинку. Открой её инструментом Read по пути {path} — "
+            "это изображение, ты его увидишь.\n"
+            + (f"Подписал так: {caption}\n" if caption else "")
+            + "Ответь по тому, что на картинке, и по подписи, если она есть."
+        )
+        try:
+            await self._think_and_reply(
+                prompt,
+                chat_id,
+                context,
+                channel="photo",
+                archived_as=f"[картинка] {caption}" if caption else "[картинка]",
+            )
+        finally:
+            # Одноразовое сносим сразу: картинка нужна была ровно на этот ответ.
+            path.unlink(missing_ok=True)
+
+    async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Сбой в обработке — в лог по-человечески, а не строкой «обработчиков нет».
+
+        Обработчик ничего не чинит: 30.07.2026 разбор показал, что цикл поллинга
+        в python-telegram-bot 22.8 настроен повторять попытки бесконечно и от
+        сетевой ошибки не умирает, — значит регистрация обработчика не была
+        лечением, вопреки записи в разборе от 25.07. Он нужен ради видимости:
+        без него библиотека печатает трейсбек с формулировкой, которая уводит
+        разбор не туда. Живучесть ушей держит внешний сторож, а не эта функция.
+        """
+        error = context.error
+        log.error("сбой в обработке: %s: %s", type(error).__name__, error, exc_info=error)
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._mine(update):
@@ -409,7 +541,10 @@ class CoachBot:
         # Telegram принимает только латиницу в командах — кириллические он отвергает
         application.add_handler(CommandHandler(["new", "reset"], self.on_reset))
         application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, self.on_voice))
+        # Картинка приходит либо сжатым фото, либо файлом — ловим оба входа.
+        application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self.on_photo))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
+        application.add_error_handler(self.on_error)
 
         queue = application.job_queue
         morning = env("MORNING_TIME", "10:00")
@@ -423,7 +558,11 @@ class CoachBot:
 
         log.info("коуч поднялся: пинги %s, %s и %s по Москве, владелец %s", morning, midday, evening, self.owner_id)
         # Вебхуки в РФ не годятся — Telegram их не достучится, работаем поллингом.
-        application.run_polling(drop_pending_updates=True)
+        # Накопленное НЕ выбрасываем: бота перезапускает сторож «бот оглох» именно
+        # тогда, когда очередь не разбирается, — и флаг «выбросить» уничтожал бы
+        # ровно те сообщения, ради которых чинили (ожог 25.07 и 30.07.2026).
+        # Цена: после долгого простоя коуч ответит на всё, что накопилось.
+        application.run_polling(drop_pending_updates=False)
 
 
 def _parse(value: str, tz: ZoneInfo) -> time:

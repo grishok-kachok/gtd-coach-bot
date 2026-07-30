@@ -39,12 +39,17 @@ class CoachEngine:
         model: str,
         effort: str = "medium",
         calendar: dict | None = None,
+        extra_dirs: list[Path] | None = None,
     ) -> None:
         self.brain_dir = brain_dir
         self.sessions = session_storage
         self.system_prompt = system_prompt
         self.model = model
         self.effort = effort
+        # Папки за пределами мозга, куда движку тоже нужен доступ. Сейчас это
+        # присланные картинки: в мозге им не место (он репозиторий), а Read по
+        # умолчанию видит только cwd — без этого списка он до них не дотянется.
+        self.extra_dirs = [str(path) for path in (extra_dirs or [])]
         self.todoist_server = build_todoist_server(todoist_token)
         # Календарь подключаем только когда заданы креды — без них бот работает как прежде.
         self.calendar_server = build_calendar_server(**calendar) if calendar else None
@@ -64,6 +69,7 @@ class CoachEngine:
             permission_mode="bypassPermissions",
             mcp_servers=mcp_servers,
             allowed_tools=allowed,
+            add_dirs=self.extra_dirs,
             setting_sources=["project"],
         )
 
