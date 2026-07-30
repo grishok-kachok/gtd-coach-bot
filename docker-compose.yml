@@ -15,6 +15,11 @@ services:
       - ARCHIVE_DB=/archive/coach.db
       - PROMPT_FILE=/app/prompts/coach.md
       - HOME=/home/coach
+      # Конфиг движка (.claude.json) по умолчанию ложится РЯДОМ с домашней папкой,
+      # то есть мимо тома ниже, и пропадает при каждом пересоздании контейнера.
+      # Этой переменной движок кладёт его ВНУТРЬ /home/coach/.claude — в том.
+      # Проверено живым тестом на движке 2.1.216.
+      - CLAUDE_CONFIG_DIR=/home/coach/.claude
       # Пакет coach-todoist-mcp приезжает не копией в образе, а смонтированным
       # клоном отдельного репо (см. volume /opt/pkg ниже). /app первым — код бота.
       - PYTHONPATH=/app:/opt/pkg

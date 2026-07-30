@@ -14,6 +14,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    TaskNotificationMessage,
     TextBlock,
 )
 
@@ -25,6 +26,14 @@ log = logging.getLogger(__name__)
 
 # Инструменты памяти + git (Bash ограничен списком разрешённых команд в settings)
 MEMORY_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "TodoWrite"]
+
+# Помощников коуч нанимать не может — и это не придирка, а свойство архитектуры.
+# Движок здесь живёт ровно один ответ: `async with ClaudeSDKClient` закрывается,
+# и всё, что он породил, умирает вместе с ним. Фоновый агент доработать не успевает
+# НИКОГДА, а его осиротевшая запись потом присылает уведомление на каждом
+# возобновлении сессии — и это уведомление съедает ход целиком (30.07.2026).
+# Снимать запрет можно только вместе с переходом на долгоживущий клиент.
+FORBIDDEN_TOOLS = ["Task"]
 
 
 class CoachEngine:
@@ -70,6 +79,7 @@ class CoachEngine:
             mcp_servers=mcp_servers,
             allowed_tools=allowed,
             add_dirs=self.extra_dirs,
+            disallowed_tools=FORBIDDEN_TOOLS,
             setting_sources=["project"],
         )
 
@@ -106,20 +116,51 @@ class CoachEngine:
             f"{text}"
         )
 
-    async def _run(self, text: str, resume: str | None) -> str:
+    async def _run(self, text: str, resume: str | None, *, second_try: bool = False) -> str:
         parts: list[str] = []
+        heard_model = False
+        notified = False
+        subtype = None
         async with ClaudeSDKClient(options=self._options(resume)) as client:
             await client.query(text)
             async for message in client.receive_response():
                 if isinstance(message, AssistantMessage):
+                    heard_model = True
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             parts.append(block.text)
+                elif isinstance(message, TaskNotificationMessage):
+                    # Движок докладывает о судьбе фонового агента. Нам он не нужен,
+                    # но факт важен: такой доклад закрывает ход, не дав модели слова.
+                    notified = True
+                    log.warning("движок прислал уведомление о фоновой задаче: %r", message)
                 elif isinstance(message, ResultMessage):
                     if message.session_id:
                         self.sessions.save(message.session_id)
+                    subtype = message.subtype
                     if message.is_error:
                         log.error("движок вернул ошибку: %s", message.result)
 
         answer = "\n".join(p.strip() for p in parts if p.strip())
-        return answer or "…(коуч промолчал — похоже, что-то пошло не так)"
+        if answer:
+            return answer
+
+        # Пустой ход. Раньше здесь молча подставлялась заглушка, и в docker logs не
+        # оставалось ни следа: 30.07.2026 бот дважды ответил «коуч промолчал», а
+        # найти причину удалось только по транскриптам сессии. Теперь — громко.
+        log.error(
+            "движок вернул пустой ответ: модель %s, уведомление о фоновой задаче %s, "
+            "subtype=%s, повторная попытка=%s",
+            "говорила" if heard_model else "молчала",
+            "было" if notified else "не приходило",
+            subtype,
+            second_try,
+        )
+        if not heard_model and not second_try:
+            # Модель не сказала ни слова — значит ход съело что-то служебное, а не она
+            # сама. Повторяем ровно один раз и по свежей закладке: уведомление уже
+            # доставлено и второй раз не придёт. Если модель говорила, но текста не
+            # дала, — не повторяем, иначе рискуем сделать её работу дважды.
+            log.warning("повторяю запрос один раз — ход съело служебное сообщение")
+            return await self._run(text, self.sessions.load() or resume, second_try=True)
+        return "…(коуч промолчал — похоже, что-то пошло не так)"
