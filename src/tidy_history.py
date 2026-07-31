@@ -25,35 +25,12 @@ from claude_agent_sdk import (
     query,
 )
 
+from .prompts import load as load_prompt
+
 log = logging.getLogger(__name__)
 
 # Коммиты, которые не жалко склеить: машинные подписи без смысла.
 AUTO_PREFIXES = ("Автосохранение мозга", "Коуч (телеграм):", "Коуч (сервер):")
-
-PROMPT = """Ты подписываешь один коммит, в который сворачивается день работы с памятью коуча.
-
-Вот что менялось за день (git diff --stat):
-
-{stat}
-
-Вот сами изменения (обрезаны, если длинные):
-
-{diff}
-
-Прежние подписи коммитов за день (машинные, их и заменяем):
-
-{subjects}
-
-Напиши сообщение коммита по-русски:
-- Первая строка — до 70 символов, суть дня по существу. Без слова «коммит», без даты в начале.
-- Пустая строка.
-- Затем 2-5 строк: что именно изменилось в памяти и почему это важно. Конкретно — имена, решения, сроки.
-- Не выдумывай того, чего нет в diff.
-- Не пиши markdown-заголовки и списки со звёздочками. Обычный текст, строки с дефисом допустимы.
-
-Верни только текст сообщения, без обрамления.
-"""
-
 
 class HistoryTidier:
     def __init__(self, repo_dir: Path, model: str = "claude-fable-5") -> None:
@@ -114,7 +91,8 @@ class HistoryTidier:
         if len(diff) > 24000:
             diff = diff[:24000] + "\n… (обрезано)"
 
-        prompt = PROMPT.format(
+        signature = load_prompt("подпись-коммита")
+        prompt = signature.format(
             stat=stat or "(нет изменений)",
             diff=diff or "(пусто)",
             subjects="\n".join(f"- {s}" for s in subjects),
@@ -123,7 +101,7 @@ class HistoryTidier:
             model=self.model,
             effort="medium",
             tools=[],
-            system_prompt="Ты аккуратно подписываешь историю изменений. Пишешь по-русски, по делу, без воды.",
+            system_prompt=signature.system,
         )
         parts: list[str] = []
         async for message in query(prompt=prompt, options=options):

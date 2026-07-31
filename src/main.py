@@ -24,15 +24,18 @@ from telegram.ext import (
 
 from . import agenda
 from .archive import Archive
+from .backstage import raise_task
 from .brain import Brain
 from .digest import Digester
 from .engine import CoachEngine
 from .memory_watch import MemoryWatch
+from .prompts import followups, load as load_prompt, missing as missing_prompts
 from .retry import retry_network
 from .rhythms import describe, path_in, read
 from .sessions import SessionStorage
 from .startup_budget import check as check_budget
 from .tidy_history import HistoryTidier
+from .todoist_snapshot import TodoistSnapshot
 from .voice import (
     DEFAULT_STT_MODEL,
     DEFAULT_STT_URL,
@@ -62,51 +65,6 @@ PHOTOS_DIR = Path(os.environ.get("PHOTOS_DIR", "/tmp/coach-photos"))
 # прочая экзотика) не притворяемся, что видим, — честно говорим владельцу.
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
-MORNING_PROMPT = (
-    "Наступило утро — время утреннего чек-ина. Перед тем как писать: загляни в "
-    "память/состояние/фокус.md, в Todoist (сегодня + просроченное) и во вчерашние "
-    "выполненные задачи. Дальше действуй по правилам раздела «Когда пишешь первым»: "
-    "главное дело дня и почему именно сегодня, вчерашние победы одной строкой (если "
-    "были), светофор только по действительно критичным задачам — и возьми с Василия "
-    "обещание дня. Сочини сообщение заново, живым языком, без шаблона.\n\n"
-    "Отдельно загляни в память/журнал/предложения-памяти.md — ночью туда могло лечь "
-    "то, что стоит записать про Василия. Факты с его же слов перенеси в память сам "
-    "и вычеркни строку. А вот вывод, который ты сделал за него, молча не записывай: "
-    "вплети про него ОДИН вопрос в чек-ин, и только с ответом переноси. Ничего "
-    "не нашлось — молчи об этом, отчитываться о пустой проверке не надо."
-)
-
-MIDDAY_PROMPT = (
-    "Середина дня — чек-ин внешней ответственности, не напоминалка. Вспомни, что "
-    "Василий пообещал утром (это выше в разговоре), загляни в Todoist — что уже "
-    "закрыто. Спроси конкретно про обещанное: как продвигается, что мешает, нужна ли "
-    "помощь — один вопрос. Утром не ответил — начни с этого, без укора. Видно, что "
-    "день идёт хорошо — скажи это одной фразой и не мешай работать."
-)
-
-EVENING_PROMPT = (
-    "Наступил вечер — время подвести день. Сверь утреннее обещание с фактом. Спроси, "
-    "что сделал и что перенести; сделанное закрой в Todoist, несделанное перенеси "
-    "осознанно. Отметь победы конкретно, с фактами. Увидел паттерн дня — скажи как "
-    "зеркало. Закончи ощущением «всё поймано»: одной строкой подтверди, что всё "
-    "записано и голову можно освободить."
-)
-
-# Дожим: Василий не отозвался на чек-ин. Внешняя ответственность не работает, если
-# от неё можно молча отвернуться, — но и долбить нельзя, иначе пролистывать начнут
-# всё подряд. Отсюда три попытки, каждая другой по характеру, и тишина после отбоя.
-FOLLOWUP_PROMPTS = (
-    "Василий не ответил на прошлый чек-ин — прошло полчаса. Достучись: коротко, "
-    "тепло, с юмором, без укора и без повторения того, что уже написал. Одна-две "
-    "строки, один вопрос. Смысл: «ты тут? я на связи».",
-    "Василий молчит второй раз подряд — это последняя попытка достучаться сегодня, "
-    "больше сегодня по этому поводу не пишешь. Смени подход: не спрашивай «как дела», "
-    "а поставь что-то на кон или назови вслух то, что видишь (например, что задача "
-    "стоит на месте второй день). Коротко и цепко, чтобы захотелось ответить. "
-    "В конце дай понять, что отстаёшь и ждёшь его хода."
-)
-
-
 def env(name: str, default: str | None = None, required: bool = False) -> str:
     value = os.environ.get(name, default or "")
     if required and not value:
@@ -131,7 +89,15 @@ class CoachBot:
             effort=env("COACH_EFFORT", "medium"),
             calendar=self._calendar_config(),
             extra_dirs=[PHOTOS_DIR],
+            dashboard={
+                "brain_dir": self.brain_dir,
+                "db_path": Path(env("ARCHIVE_DB", "/archive/coach.db")),
+                "todoist_token": self.todoist_token,
+                "send": self._send_document,
+            },
         )
+        # Заполняется в run(): инструмент дашборда шлёт файл через это приложение.
+        self.app: Application | None = None
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         self.voice = self._voice_recognizer()
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
@@ -142,6 +108,10 @@ class CoachBot:
         self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
         self.tidier = HistoryTidier(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
         self.memory_watch = MemoryWatch(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
+        # Несгораемая история дел: Todoist на Free помнит ~неделю, снимок помнит всё.
+        self.snapshot = TodoistSnapshot(
+            Path(env("ARCHIVE_DB", "/archive/coach.db")), self.todoist_token
+        )
         self.broken_rhythms = "; ".join(problems)
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
@@ -254,7 +224,7 @@ class CoachBot:
                 # Сводку дел — к каждой реплике: коуч обязан знать картину дня всегда,
                 # а не когда вспомнит сходить в Todoist.
                 summary = await agenda.summary(self.todoist_token)
-                self._check_load(memory, summary)
+                await self._check_load(memory, summary)
                 answer = await self.engine.ask(text, memory, summary)
                 await self.brain.push(text[:60].replace("\n", " "))
             except Exception as error:  # доставляем боль владельцу, а не в лог-файл
@@ -270,6 +240,26 @@ class CoachBot:
 
         for chunk in self._split(answer):
             await context.bot.send_message(chat_id=chat_id, text=chunk)
+
+    async def _send_document(self, path: Path, caption: str = "") -> bool:
+        """Отправить файл владельцу. Возвращает, дошёл ли.
+
+        Библиотека это умела всегда, а бот — нет: до 31.07 у него был только
+        send_message. Проверено grep'ом, не памятью.
+        """
+        if self.app is None:
+            log.error("файл «%s» некуда слать: приложение ещё не поднято", path.name)
+            return False
+        try:
+            with path.open("rb") as файл:
+                await self.app.bot.send_document(
+                    chat_id=self.owner_id, document=файл,
+                    filename=path.name, caption=caption or None,
+                )
+        except Exception:  # телеграм упал, файл великоват, сеть — исход один
+            log.exception("не смог отправить файл %s", path)
+            return False
+        return True
 
     async def _keep_typing(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
@@ -485,14 +475,28 @@ class CoachBot:
         )
 
     async def ping(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        prompt, channel = context.job.data
-        sent_at = datetime.now(MOSCOW).isoformat(timespec="seconds")
+        # В задании лежит ИМЯ промпта, а не текст: файл читается в момент пинга,
+        # значит правка текста в плагине доезжает перезапуском, а не пересборкой.
+        name, channel = context.job.data
+        now = datetime.now(MOSCOW)
+        # Первого числа утренний чек-ин уступает место стратсессии: месяц
+        # закрылся ночью, и разговор в этот день начинается с итога, а не
+        # с обещания дня. Двух сообщений подряд не шлём — это один разговор.
+        if name == "чекин-утро" and now.day == 1:
+            # Подводим ЗАКРЫВШИЙСЯ месяц, а не начавшийся: первого августа
+            # итог пишется за июль. Отсюда шаг на день назад.
+            closed = (now.date() - timedelta(days=1)).strftime("%Y-%m")
+            prompt = load_prompt("месячный-итог").format(month=closed)
+            channel = "monthly"
+        else:
+            prompt = load_prompt(name).text
+        sent_at = now.isoformat(timespec="seconds")
         await self._think_and_reply(prompt, self.owner_id, context, channel=channel)
         self._schedule_followup(context, sent_at, attempt=1)
 
     def _schedule_followup(self, context: ContextTypes.DEFAULT_TYPE, sent_at: str, attempt: int) -> None:
         """Завести следующую попытку достучаться, если она ещё в запасе."""
-        if attempt > len(FOLLOWUP_PROMPTS):
+        if attempt > len(followups()):
             return
         context.job_queue.run_once(
             self.follow_up,
@@ -515,8 +519,11 @@ class CoachBot:
         if now.hour >= self.rhythms["тихий_час"] or now.hour < 8:
             log.info("дожим %s отменён: время тихое (%s)", attempt, now.strftime("%H:%M"))
             return
+        attempts = followups()
+        if attempt > len(attempts):  # промпт убрали из плагина, пока дожим ждал в очереди
+            return
         await self._think_and_reply(
-            FOLLOWUP_PROMPTS[attempt - 1], self.owner_id, context, channel="nudge"
+            attempts[attempt - 1].text, self.owner_id, context, channel="nudge"
         )
         self._schedule_followup(context, sent_at, attempt + 1)
 
@@ -540,7 +547,27 @@ class CoachBot:
                 # Второй вопрос к тому же дню — уже про саму память: что пора
                 # записать и где она сегодня подвела. Просьба в тексте конституции
                 # («увидел паттерн — допиши») не срабатывала; будильник срабатывает.
-                await self.memory_watch.run(yesterday, self.digester.transcript_of(yesterday))
+                found = await self.memory_watch.run(
+                    yesterday, self.digester.transcript_of(yesterday)
+                )
+                # Найденное молча в копилке — свалка. Дёргаем за рукав задачей
+                # с датой: одна на копилку, не на каждую находку.
+                if found.get("факты") or found.get("выводы"):
+                    await raise_task(
+                        self.todoist_token, "предложения",
+                        f"Ночь {yesterday.isoformat()}: фактов {found['факты']}, "
+                        f"выводов {found['выводы']}. Выводы записываются только "
+                        f"после подтверждения Василием.",
+                    )
+                if found.get("промахи"):
+                    await raise_task(
+                        self.todoist_token, "промахи",
+                        f"Ночь {yesterday.isoformat()}: промахов {found['промахи']}.",
+                    )
+
+                # Снимок дел — прежде укрупнений: он должен успеть сохранить то,
+                # что человек может удалить завтра. Ноль токенов, чистый код.
+                await self.snapshot.run(today)
 
                 # Укрупняем только законченные периоды и только по календарю.
                 if yesterday.weekday() == 6:  # воскресенье закрыло неделю
@@ -550,7 +577,15 @@ class CoachBot:
                 # Журнал держим в том же окне, что читает коуч, — вместе с адресами.
                 self.digester.rotate()
 
-                await self.brain.push(f"выжимка за {yesterday.isoformat()}")
+                if not await self.brain.push(f"выжимка за {yesterday.isoformat()}"):
+                    # push вернул False и когда менять было нечего, и когда он упал.
+                    # Различаем по логу; задачу поднимаем только если правки были.
+                    if await self.brain.dirty():
+                        await raise_task(
+                            self.todoist_token, "синхронизация",
+                            f"Ночь {yesterday.isoformat()}: изменения в мозге есть, "
+                            f"а на GitHub они не уехали.",
+                        )
 
                 # История дня подписывается по-человечески той же моделью,
                 # что делала выжимку — сторож на маке для этого слишком туп и быстр.
@@ -559,7 +594,7 @@ class CoachBot:
                 log.exception("ночная выжимка сорвалась")
 
 
-    def _check_load(self, memory: str, summary: str) -> None:
+    async def _check_load(self, memory: str, summary: str) -> None:
         """Сверить то, что реально кладём в контекст, с паспортом памяти.
 
         Считаем только когда память подставляется — то есть в первый запрос новой
@@ -579,13 +614,16 @@ class CoachBot:
         })
         if beef:
             log.warning("стартовая загрузка разошлась с паспортом: %s", beef)
+            # Сигнализация без реакции — декорация. Лампочка горит → задача с датой.
+            await raise_task(self.todoist_token, "потолок", beef)
 
     # --- ритмы ---
 
+    # Ключ ритма → (имя будильника, имя промпта в плагине, канал архива).
     ALARMS = {
-        "утро": ("утро", MORNING_PROMPT, "morning"),
-        "день": ("день", MIDDAY_PROMPT, "midday"),
-        "вечер": ("вечер", EVENING_PROMPT, "evening"),
+        "утро": ("утро", "чекин-утро", "morning"),
+        "день": ("день", "чекин-день", "midday"),
+        "вечер": ("вечер", "чекин-вечер", "evening"),
     }
 
     def _hang_alarms(self, queue) -> None:
@@ -593,10 +631,10 @@ class CoachBot:
         for name in list(self.ALARMS) + ["выжимка"]:
             for job in queue.get_jobs_by_name(name):
                 job.schedule_removal()
-        for key, (name, prompt, channel) in self.ALARMS.items():
+        for key, (name, prompt_name, channel) in self.ALARMS.items():
             queue.run_daily(
                 self.ping, time=_parse(self.rhythms[key], MOSCOW),
-                data=(prompt, channel), name=name,
+                data=(prompt_name, channel), name=name,
             )
         queue.run_daily(
             self.nightly_digest, time=_parse(self.rhythms["ночная_выжимка"], MOSCOW), name="выжимка"
@@ -619,6 +657,10 @@ class CoachBot:
                     chat_id=self.owner_id,
                     text=(f"Файл ритмов не читается, живу по прежнему расписанию.\n{beef}\n\n"
                           f"Адрес: {path_in(self.brain_dir)}"),
+                )
+                # Сообщение уползёт вверх и забудется — дублируем задачей с датой.
+                await raise_task(
+                    self.todoist_token, "ритмы", f"{beef}\nАдрес: {path_in(self.brain_dir)}"
                 )
             return
         self.broken_rhythms = ""
@@ -653,7 +695,16 @@ class CoachBot:
     # --- запуск ---
 
     def run(self) -> None:
+        # Тексты поведения живут в плагине. Нехватка обязана вскрыться здесь,
+        # одной понятной строкой, а не ночью в 03:00 внутри ночного прогона.
+        gone = missing_prompts()
+        if gone:
+            raise SystemExit(
+                "В плагине нет промптов: " + ", ".join(gone) +
+                ". Проверь, что клон плагина на сервере свежий и том /plugin смонтирован."
+            )
         application = Application.builder().token(env("TELEGRAM_BOT_TOKEN", required=True)).build()
+        self.app = application  # через него инструмент дашборда шлёт файл
 
         application.add_handler(CommandHandler("start", self.on_start))
         # Telegram принимает только латиницу в командах — кириллические он отвергает

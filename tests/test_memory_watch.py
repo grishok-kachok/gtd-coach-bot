@@ -46,7 +46,7 @@ def watch(tmp_path):
 
 
 def feed(watch, answer):
-    async def fake_ask(prompt):
+    async def fake_ask(prompt, system=""):
         return answer
     watch._ask = fake_ask
     return asyncio.run(watch.run(date(2026, 8, 1), "разговор " * 100))

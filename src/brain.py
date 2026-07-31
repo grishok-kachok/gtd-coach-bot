@@ -39,6 +39,19 @@ class Brain:
             log.warning("git pull не прошёл: %s", text)
             await self._git("rebase", "--abort")
 
+    async def dirty(self) -> bool:
+        """Есть ли что отдавать: незакоммиченное или неотправленные коммиты.
+
+        Нужно, чтобы отличить «отдавать было нечего» от «отдать не смогли»:
+        `push` возвращает False в обоих случаях, а поднимать задачу человеку
+        надо только во втором.
+        """
+        _, status = await self._git("status", "--porcelain")
+        if status:
+            return True
+        code, ahead = await self._git("rev-list", "--count", "@{u}..HEAD")
+        return bool(code == 0 and ahead.strip() not in ("", "0"))
+
     async def push(self, reason: str) -> bool:
         """Закоммитить и отправить, если что-то поменялось."""
         _, status = await self._git("status", "--porcelain")

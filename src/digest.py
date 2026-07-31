@@ -25,44 +25,9 @@ from claude_agent_sdk import (
 )
 
 from .archive import WINDOW, Archive
+from .prompts import load as load_prompt
 
 log = logging.getLogger(__name__)
-
-DAY_PROMPT = """Ниже — стенограмма разговора коуча с Василием за {day}.
-
-Сделай плотную выжимку этого дня. Требования:
-- Дата дня — {day}, и никакая другая. Слова «сегодня» и «завтра» в стенограмме
-  считай от неё. Своей строки с датой и заголовка не пиши: они уже есть в заметке.
-- Что Василий делал, что решил, о чём договорились, что его беспокоит.
-- Обязательно сохрани конкретику: имена, суммы, даты, названия задач и проектов.
-- Отдельной строкой — что изменилось в планах или сроках, если менялось.
-- Отдельной строкой — новое понимание про Василия (что сработало, что бесит), если проявилось.
-- Не пересказывай вежливости и служебную возню с инструментами.
-- Пиши сжато, но не ценой фактов: лучше лишняя строка, чем потерянная деталь.
-- Простой текст, без markdown-заголовков. 10–20 строк.
-
-Проверь себя по пяти вопросам — по одной твоей выжимке коуч должен уметь
-ответить на каждый: что Василий обещал и сдержал ли; что застряло и почему;
-что нового узнали про него самого; какие решения приняты; какое у него
-состояние сил. Нет ответа — строку добавь.
-
-Если разговора по сути не было — ответь одной строкой: ПУСТО
-
-Стенограмма:
-
-"""
-
-ROLLUP_PROMPT = """Ниже — дневные выжимки за {period}. Сделай из них одну обобщённую выжимку.
-
-- {focus}
-- Убери повседневный шум, оставь линии: что двигалось, что застряло, что решили.
-- Сохрани конкретику по срокам, деньгам, договорённостям и результатам.
-- Отдельно — устойчивые наблюдения про Василия (паттерны, а не разовые эпизоды).
-- Простой текст, без markdown-заголовков. 15–30 строк.
-
-Дневные выжимки:
-
-"""
 
 # У каждого уровня своя работа, иначе месяц получается пересказом недели.
 # День — факты; неделя — что сдвинулось и что застряло; месяц — траектория.
@@ -121,15 +86,12 @@ class Digester:
         self.model = model
         self.paths = DigestPaths.under(brain_dir)
 
-    async def _summarize(self, prompt: str) -> str:
+    async def _summarize(self, prompt: str, system: str) -> str:
         options = ClaudeAgentOptions(
             model=self.model,
             effort="high",  # выжимка делается раз в сутки — экономить тут нечего
             tools=[],       # думать, а не лазить по файлам
-            system_prompt=(
-                "Ты ведёшь дневник коуча. Твоя работа — сжимать разговоры, "
-                "не теряя фактов. Пишешь по-русски, просто и плотно."
-            ),
+            system_prompt=system,
         )
         parts: list[str] = []
         async for message in query(prompt=prompt, options=options):
@@ -185,7 +147,10 @@ class Digester:
             log.info("за %s говорить не о чем — выжимку не делаю", day)
             return None
 
-        summary = await self._summarize(DAY_PROMPT.format(day=day.isoformat()) + transcript)
+        day_prompt = load_prompt("выжимка-дня")
+        summary = await self._summarize(
+            day_prompt.format(day=day.isoformat()) + "\n\n" + transcript, day_prompt.system
+        )
         if not summary or summary.strip().upper().startswith("ПУСТО"):
             return None
 
@@ -224,7 +189,10 @@ class Digester:
             return None
         body = "\n\n---\n\n".join(f"{key}:\n{text}" for key, text in days)
         period_name, focus = LEVELS[period]
-        summary = await self._summarize(ROLLUP_PROMPT.format(period=period_name, focus=focus) + body)
+        rollup = load_prompt("выжимка-укрупнение")
+        summary = await self._summarize(
+            rollup.format(period=period_name, focus=focus) + "\n\n" + body, rollup.system
+        )
         if not summary:
             return None
         head = FRONTMATTER.format(

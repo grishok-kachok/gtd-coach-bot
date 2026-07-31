@@ -28,7 +28,7 @@ class Lab:
         self.digester = Digester(self.brain, self.archive)
         self.prompts: list[str] = []
 
-        async def fake_summarize(prompt: str) -> str:
+        async def fake_summarize(prompt: str, system: str = "") -> str:
             self.prompts.append(prompt)
             return "укрупнённая выжимка"
 

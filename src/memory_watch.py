@@ -42,53 +42,9 @@ from claude_agent_sdk import (
 )
 
 from .notes import append
+from .prompts import load as load_prompt
 
 log = logging.getLogger(__name__)
-
-PROMPT = """Ниже — что коуч знает про Василия сегодня, и стенограмма разговора за {day}.
-
-Твоя работа — не пересказать день (это уже сделано выжимкой), а ответить
-на два вопроса.
-
-**1. Что из этого дня должно осесть в памяти, но её ещё нет?**
-Сравни разговор с тем, что уже записано в знаниях. Разложи найденное на два вида:
-
-- **Факты со слов Василия** — он сам это сказал: даты, имена, суммы, решения,
-  «мне не нравится, когда…», «я так не работаю». Такое пишется в память сразу.
-- **Выводы** — то, что ты вывел сам, наблюдая за ним: паттерны, повторы,
-  «похоже, его тормозит…». Такое требует подтверждения у Василия.
-
-Не предлагай то, что уже записано. Не предлагай разовые эпизоды — память
-про человека, а не про день. Нечего предложить — так и напиши, это нормальный
-исход, а не провал.
-
-**2. Где память сегодня подвела?**
-Промах — наблюдаемое событие, а не ощущение. Считаются два вида:
-- коуч полез в архив или переспросил за тем, что должно было быть в памяти;
-- Василий поправил коуча или повторил то, что уже говорил раньше.
-Для каждого промаха: что именно искали, где это должно было лежать.
-
-Отвечай строго в таком виде, без вступлений и без markdown-заголовков сверху:
-
-ФАКТЫ:
-- ...
-
-ВЫВОДЫ:
-- ...
-
-ПРОМАХИ:
-- ...
-
-Пустой раздел пиши как «- нет».
-
-=== ЧТО УЖЕ ЗАПИСАНО В ПАМЯТИ ===
-
-{knowledge}
-
-=== СТЕНОГРАММА ДНЯ {day} ===
-
-{transcript}
-"""
 
 PROPOSALS = "предложения-памяти.md"
 MISSES = "промахи-памяти.md"
@@ -102,15 +58,12 @@ class MemoryWatch:
         self.model = model
         self.journal = brain_dir / "память" / "журнал"
 
-    async def _ask(self, prompt: str) -> str:
+    async def _ask(self, prompt: str, system: str) -> str:
         options = ClaudeAgentOptions(
             model=self.model,
             effort="high",  # раз в сутки — экономить нечего
             tools=[],       # думать, а не лазить по файлам
-            system_prompt=(
-                "Ты следишь за памятью коуча: что в неё пора записать и где она "
-                "сегодня не сработала. Пишешь по-русски, коротко и по фактам."
-            ),
+            system_prompt=system,
         )
         parts: list[str] = []
         async for message in query(prompt=prompt, options=options):
@@ -151,8 +104,10 @@ class MemoryWatch:
         if len(transcript) < 200:
             return {"факты": 0, "выводы": 0, "промахи": 0}
 
+        prompt = load_prompt("проверка-памяти")
         answer = await self._ask(
-            PROMPT.format(day=day.isoformat(), knowledge=self._knowledge(), transcript=transcript)
+            prompt.format(day=day.isoformat(), knowledge=self._knowledge(), transcript=transcript),
+            prompt.system,
         )
         facts = self._section(answer, "ФАКТЫ")
         conclusions = self._section(answer, "ВЫВОДЫ")

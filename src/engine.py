@@ -21,6 +21,7 @@ from claude_agent_sdk import (
 from .gcal import build_calendar_server
 from .sessions import SessionStorage
 from .todoist import build_todoist_server
+from .dashboard_tool import build_dashboard_server
 from .wishes import build_wishes_server
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class CoachEngine:
         effort: str = "medium",
         calendar: dict | None = None,
         extra_dirs: list[Path] | None = None,
+        dashboard: dict | None = None,
     ) -> None:
         self.brain_dir = brain_dir
         self.sessions = session_storage
@@ -68,7 +70,9 @@ class CoachEngine:
         self.extra_dirs = [str(path) for path in (extra_dirs or [])]
         self.todoist_server = build_todoist_server(todoist_token)
         # Заявки: «хочу, чтобы ты умел X» — коуч записывает, а не делает.
-        self.wishes_server = build_wishes_server(brain_dir)
+        self.wishes_server = build_wishes_server(brain_dir, todoist_token)
+        # Дашборд — файл в телеграм. Отправка обязана случаться, значит инструмент.
+        self.dashboard_server = build_dashboard_server(**dashboard) if dashboard else None
         # Календарь подключаем только когда заданы креды — без них бот работает как прежде.
         self.calendar_server = build_calendar_server(**calendar) if calendar else None
 
@@ -78,6 +82,9 @@ class CoachEngine:
         if self.calendar_server is not None:
             mcp_servers["calendar"] = self.calendar_server
             allowed = allowed + ["mcp__calendar"]
+        if self.dashboard_server is not None:
+            mcp_servers["dashboard"] = self.dashboard_server
+            allowed = allowed + ["mcp__dashboard"]
         return ClaudeAgentOptions(
             system_prompt=self.system_prompt,
             cwd=str(self.brain_dir),

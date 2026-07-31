@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from .backstage import raise_task
 from .notes import append
 
 log = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ NOTE = (
 )
 
 
-def build_wishes_server(brain_dir: Path, tz: str = "Europe/Moscow"):
+def build_wishes_server(brain_dir: Path, todoist_token: str = "", tz: str = "Europe/Moscow"):
     @tool(
         "record_wish",
         "Записать заявку на новую способность коуча. Звать, когда Василий просит "
@@ -66,6 +67,11 @@ def build_wishes_server(brain_dir: Path, tz: str = "Europe/Moscow"):
         except OSError:
             log.exception("не смог записать заявку")
             return {"content": [{"type": "text", "text": "Не смог записать заявку — скажи об этом вслух."}]}
+
+        # Копилка, в которую не заглядывают, — свалка. Дёргаем за рукав задачей
+        # с датой: одна на копилку, а не на каждую заявку.
+        if todoist_token:
+            await raise_task(todoist_token, "заявка", f"{today.isoformat()}: «{what}».")
 
         log.info("заявка записана: %s", what[:80])
         return {"content": [{"type": "text", "text": (
