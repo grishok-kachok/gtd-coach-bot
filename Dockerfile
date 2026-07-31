@@ -21,8 +21,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Конституции коуча в образе нет намеренно: она уехала в плагин gtd-coach
+# и приезжает смонтированным клоном (том /plugin в compose). Правка текста
+# правила не должна требовать пересборки питона.
 COPY src/ ./src/
-COPY prompts/ ./prompts/
 
 # Каталоги создаём до монтирования: docker переносит их владельца на новый том
 RUN useradd -u 1000 -m coach && mkdir -p /brain /state /archive \

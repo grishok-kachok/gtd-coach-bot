@@ -171,7 +171,17 @@ class CoachBot:
         return VoiceRecognizer(primary=primary, fallback=openai, proxy=proxy)
 
     def _system_prompt(self) -> str:
-        path = Path(env("PROMPT_FILE", "/app/prompts/coach.md"))
+        # Конституция живёт в плагине gtd-coach и приезжает смонтированным
+        # клоном, а не копией в образе. Отсюда новый способ сломаться: если
+        # клона на сервере нет, docker молча подставит пустую папку — бот
+        # стартует и упадёт на чтении. Падать надо вслух и по адресу, иначе
+        # причину искать полчаса.
+        path = Path(env("PROMPT_FILE", "/plugin/prompts/coach.md"))
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"конституция коуча не найдена: {path}. Проверь, что клон плагина "
+                f"есть на сервере и смонтирован (том /plugin в docker-compose.yml)"
+            )
         return path.read_text(encoding="utf-8")
 
     @staticmethod

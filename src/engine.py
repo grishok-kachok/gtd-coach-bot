@@ -35,6 +35,12 @@ MEMORY_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "TodoWrite"]
 # Снимать запрет можно только вместе с переходом на долгоживущий клиент.
 FORBIDDEN_TOOLS = ["Task"]
 
+# Роль коуча — плагин gtd-coach, смонтированный только на чтение (том /plugin).
+# Маркетплейс здесь не годится: движок в контейнере принимает лишь локальный путь
+# (SdkPluginConfig = {"type": "local", "path": str}, проверено на SDK 0.2.124).
+# Отсюда же конституция: PROMPT_FILE указывает внутрь этой папки.
+PLUGINS = [{"type": "local", "path": "/plugin"}]
+
 
 class CoachEngine:
     """Один непрерывный разговор с коучем."""
@@ -81,6 +87,7 @@ class CoachEngine:
             add_dirs=self.extra_dirs,
             disallowed_tools=FORBIDDEN_TOOLS,
             setting_sources=["project"],
+            plugins=PLUGINS,
         )
 
     async def ask(self, text: str, memory: str = "") -> str:

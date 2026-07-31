@@ -13,7 +13,7 @@ services:
       - BRAIN_DIR=/brain
       - STATE_DIR=/state
       - ARCHIVE_DB=/archive/coach.db
-      - PROMPT_FILE=/app/prompts/coach.md
+      - PROMPT_FILE=/plugin/prompts/coach.md
       - HOME=/home/coach
       # Конфиг движка (.claude.json) по умолчанию ложится РЯДОМ с домашней папкой,
       # то есть мимо тома ниже, и пропадает при каждом пересоздании контейнера.
@@ -33,6 +33,12 @@ services:
       # (второй read-only deploy-ключ). Монтируем его src → /opt/pkg, PYTHONPATH
       # видит пакет coach_todoist_mcp. Ключа в образе нет, build-time доступа нет.
       - /opt/apps/coach-todoist-mcp/src:/opt/pkg:ro
+      # Роль коуча — из отдельного репо vefmvai/gtd-coach (один дом). Тем же
+      # приёмом, что и Todoist выше: клон на сервере обновляется git pull,
+      # монтируется только на чтение. Маркетплейс контейнер не умеет — движок
+      # в нём принимает лишь локальный путь. Плагин подхватывается на СЛЕДУЮЩЕЙ
+      # сессии, поэтому выкатка всегда с рестартом.
+      - /opt/apps/gtd-coach-plugin:/plugin:ro
       - archive:/archive                           # сырьё разговоров + выжимки (в бэкапе по имени тома)
     # Живость поллера: свежесть пульса главного цикла + ответ Telegram через прокси.
     # Подробности и обоснование — в src/healthcheck.py. Красный healthcheck сам
