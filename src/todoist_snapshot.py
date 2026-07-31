@@ -125,19 +125,19 @@ class TodoistSnapshot:
 
             tasks = await client.get_paginated("/tasks", params={"limit": 200}, cap=1000)
 
-            # Комментарии — только у тех задач, у которых они есть. У задачи
-            # есть поле note_count, и по нему сотня запросов превращается
-            # в единицы.
+            # Комментарии спрашиваем У КАЖДОЙ задачи, по одному запросу.
             #
-            # Первая версия тянула комментарии ПО ПРОЕКТАМ — шесть запросов
-            # вместо ста, красиво и неверно: `/comments?project_id=` отдаёт
-            # комментарии САМОГО проекта, а не его задач. Прогон на живом
-            # аккаунте дал ноль комментариев при 140 задачах, и это поймало
-            # ошибку. Чтением документации она не ловилась.
+            # Дважды пытались сэкономить, и оба раза экономия молча теряла данные.
+            # Первый заход тянул по проектам — `/comments?project_id=` отдаёт
+            # комментарии САМОГО проекта, а не его задач: ноль при 140 задачах.
+            # Второй заход спрашивал только там, где `note_count > 0`, — а поле
+            # врёт: на живом аккаунте комментарий добавили, и note_count остался
+            # нулём (проверка 31.07). То есть отбор по нему пропустил бы всё.
+            #
+            # Плата за честность — около сотни запросов в ночь. Это ноль токенов
+            # и десяток секунд раз в сутки; потерянный комментарий стоит дороже.
             comments: dict[str, list[str]] = {}
             for task in tasks:
-                if not task.get("note_count"):
-                    continue
                 try:
                     found = await client.get_paginated(
                         "/comments", params={"task_id": task["id"], "limit": 100}
@@ -145,7 +145,8 @@ class TodoistSnapshot:
                 except TodoistError as err:
                     log.warning("комментарии задачи %s не забрались: %s", task["id"], err)
                     continue
-                comments[task["id"]] = [c.get("content", "") for c in found]
+                if found:
+                    comments[task["id"]] = [c.get("content", "") for c in found]
 
             yesterday = (_today() - timedelta(days=1)).isoformat()
             today = _today().isoformat()
