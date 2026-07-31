@@ -44,7 +44,8 @@ class ПоддельныйTodoist:
         if path == "/tasks":
             return list(self.tasks)
         if path == "/comments":
-            return list(self.comments)
+            задача = (params or {}).get("task_id")
+            return [c for c in self.comments if c.get("task_id") == задача]
         if path == "/tasks/completed/by_completion_date":
             return list(self.closed)
         raise AssertionError(f"неожиданный путь {path}")
@@ -54,6 +55,7 @@ def задача(task_id, content, **поля):
     основа = {
         "id": task_id, "content": content, "description": "", "project_id": "p1",
         "section_id": "s1", "labels": [], "priority": 1, "due": None, "added_at": "2026-07-01",
+        "note_count": 0,
     }
     основа.update(поля)
     return основа
@@ -78,7 +80,8 @@ def строки(хранилище, таблица, day=None):
 
 def test_первая_ночь_кладёт_задачи_с_описанием_и_комментариями(лаборатория):
     хранилище, todoist = лаборатория
-    todoist.tasks = [задача("t1", "Смена регистрации", description="служит цели: Бали")]
+    todoist.tasks = [задача("t1", "Смена регистрации", description="служит цели: Бали",
+                            note_count=1)]
     todoist.comments = [{"task_id": "t1", "content": "звонил в МФЦ"}]
 
     итог = asyncio.run(хранилище.run(date(2026, 8, 1)))
@@ -88,6 +91,16 @@ def test_первая_ночь_кладёт_задачи_с_описанием_�
     assert строка["description"] == "служит цели: Бали"
     assert json.loads(строка["comments"]) == ["звонил в МФЦ"]
     assert строка["project"] == "Рабочее" and строка["section"] == "Идеи"
+
+
+def test_без_комментариев_за_ними_не_ходим(лаборатория):
+    """Дефект, пойманный прогоном: комментарии берутся по task_id, а не по проекту,
+    и только у задач с note_count > 0 — иначе сотня лишних запросов каждую ночь."""
+    хранилище, todoist = лаборатория
+    todoist.tasks = [задача("t1", "Без комментариев")]
+    todoist.comments = [{"task_id": "t1", "content": "не должен попасть"}]
+    asyncio.run(хранилище.run(date(2026, 8, 1)))
+    assert json.loads(строки(хранилище, "todoist_tasks")[0]["comments"]) == []
 
 
 def test_первая_ночь_диффа_не_даёт(лаборатория):

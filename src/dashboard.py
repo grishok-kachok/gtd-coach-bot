@@ -36,7 +36,7 @@ from coach_todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 
-FRONTMATTER = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
+FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 YAML_BLOCK = re.compile(r"```yaml\s*\n(.*?)\n```", re.DOTALL)
 
 # Приборы панели: у каждого свой вопрос и своё исправное состояние.
@@ -56,6 +56,7 @@ class Данные:
     """Всё, что попадает на страницу. Пустое поле рисуется как «пока не заполнено»."""
 
     миссия: str = ""
+    черновики: list[str] = field(default_factory=list)
     горизонты: dict[str, str] = field(default_factory=dict)
     цели: list[dict] = field(default_factory=list)
     колесо: list[tuple[str, dict]] = field(default_factory=list)
@@ -65,13 +66,31 @@ class Данные:
 
 # ── чтение мозга ─────────────────────────────────────────────────────────────
 
+def _черновик(path: Path) -> bool:
+    """Заметка ещё не подтверждена человеком (`status: draft` в шапке)."""
+    if not path.exists():
+        return False
+    head = FRONTMATTER.match(path.read_text(encoding="utf-8"))
+    return bool(head and re.search(r"^status:\s*draft\s*$", head.group(1), re.M))
+
+
 def _тело(path: Path) -> str:
-    """Текст заметки без YAML-шапки и без заголовка первого уровня."""
+    """Содержательная часть заметки: без шапки, заголовка и служебных врезок.
+
+    **Цитаты (`>`) на дашборд не идут.** В этом мозге блок-цитата — всегда
+    служебное: закон модуля, объяснение валидатору, пометка «это черновик».
+    Проверено вживую 31.07: первая версия вывалила на телефон рассуждение
+    про `consensus: single` вместо миссии. Человеку нужно содержание,
+    а разговор с валидатором пусть остаётся в файле.
+    """
     if not path.exists():
         return ""
     текст = FRONTMATTER.sub("", path.read_text(encoding="utf-8"))
-    строки = [s for s in текст.splitlines() if not s.startswith("# ")]
-    return "\n".join(строки).strip()
+    строки = [
+        s for s in текст.splitlines()
+        if not s.startswith("# ") and not s.lstrip().startswith(">")
+    ]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(строки)).strip()
 
 
 def _горизонты(path: Path) -> dict[str, str]:
@@ -173,8 +192,16 @@ def _период(db_path: Path, дней: int) -> dict[str, int]:
 
 async def собрать(brain_dir: Path, db_path: Path, token: str, дней: int = 7) -> Данные:
     память = brain_dir / "память"
+    черновики = [
+        имя for имя, путь in (
+            ("миссия", память / "знания" / "миссия.md"),
+            ("ценности", память / "знания" / "ценности.md"),
+            ("горизонты", память / "состояние" / "горизонты.md"),
+        ) if _черновик(путь)
+    ]
     данные = Данные(
         миссия=_тело(память / "знания" / "миссия.md"),
+        черновики=черновики,
         горизонты=_горизонты(память / "состояние" / "горизонты.md"),
         колесо=_колесо(память / "журнал" / "колесо-баланса.md"),
         период=_период(db_path, дней),
@@ -196,11 +223,38 @@ def _э(текст: str) -> str:
     return html.escape(текст or "")
 
 
+ЖИРНОЕ = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+КОД = re.compile(r"`([^`]+)`")
+
+
+def _строка(текст: str) -> str:
+    """Экранируем, потом отрисовываем жирное и код. Порядок именно такой:
+    сначала гасим чужой HTML, и только потом ставим свой."""
+    готово = _э(текст)
+    готово = ЖИРНОЕ.sub(r"<strong>\1</strong>", готово)
+    return КОД.sub(r"<code>\1</code>", готово)
+
+
 def _абзацы(текст: str) -> str:
+    """Абзацы, списки и подзаголовки. Не полный markdown — ровно то, чем
+    написаны заметки курса: `**жирное**`, `` `код` ``, списки на дефисах, `###`.
+    Иначе на телефоне видны сами звёздочки, а не жирный шрифт (проверено вживую)."""
     if not текст:
         return '<p class="пусто">Пока не заполнено — проговорим в разговоре.</p>'
-    куски = [k.strip() for k in текст.split("\n\n") if k.strip()]
-    return "".join(f"<p>{_э(k).replace(chr(10), '<br>')}</p>" for k in куски)
+
+    куски = []
+    for блок in (k.strip() for k in текст.split("\n\n")):
+        if not блок:
+            continue
+        строки = блок.splitlines()
+        if all(s.lstrip().startswith(("- ", "* ")) for s in строки):
+            пункты = "".join(f"<li>{_строка(s.lstrip()[2:])}</li>" for s in строки)
+            куски.append(f"<ul>{пункты}</ul>")
+        elif блок.startswith("###"):
+            куски.append(f"<h4>{_строка(блок.lstrip('# '))}</h4>")
+        else:
+            куски.append("<p>" + "<br>".join(_строка(s) for s in строки) + "</p>")
+    return "".join(куски)
 
 
 def _колесо_svg(ряды: list[tuple[str, dict]]) -> str:
@@ -299,6 +353,13 @@ h2 { font-size:17px; margin:28px 0 10px; padding-bottom:6px;
 h3 { font-size:15px; margin:16px 0 6px; color:var(--акцент); letter-spacing:.04em; }
 .дата { color:var(--тихий); font-size:14px; margin:0 0 8px; }
 .пусто { color:var(--тихий); font-style:italic; }
+.черновик { background:var(--карточка); border:1px solid var(--тревога); color:var(--тревога);
+            border-radius:8px; padding:8px 10px; font-size:13px; margin:0 0 14px; }
+h4 { font-size:14px; margin:14px 0 4px; color:var(--тихий); text-transform:uppercase;
+     letter-spacing:.04em; }
+ul { margin:0 0 10px; padding-left:20px; }
+li { margin-bottom:4px; }
+code { background:var(--рамка); border-radius:4px; padding:1px 5px; font-size:13px; }
 section { background:var(--карточка); border:1px solid var(--рамка);
           border-radius:12px; padding:14px 16px; margin-bottom:14px; }
 p { margin:0 0 10px; }
@@ -330,6 +391,10 @@ def нарисовать(данные: Данные, день: date) -> str:
         f"<h3>{_э(имя)}</h3>{_абзацы(данные.горизонты.get(имя, ''))}"
         for имя in ("ГОД", "КВАРТАЛ", "МЕСЯЦ")
     )
+    плашка = (
+        '<p class="черновик">⚠️ Черновик: ' + _э(", ".join(данные.черновики))
+        + " — собрано агентом из журнала и Василием не подтверждено.</p>"
+    ) if данные.черновики else ""
     период = данные.период
     период_html = (
         f"<p>Закрыто за последние {период['дней']} дн.: <strong>{период['закрыто']}</strong></p>"
@@ -342,6 +407,7 @@ def нарисовать(данные: Данные, день: date) -> str:
 <style>{СТИЛИ}</style></head><body>
 <h1>Курс</h1>
 <p class="дата">{день.strftime('%d.%m.%Y')}</p>
+{плашка}
 
 <section><h2>Миссия</h2>{_абзацы(данные.миссия)}</section>
 

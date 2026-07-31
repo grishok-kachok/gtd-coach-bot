@@ -125,21 +125,27 @@ class TodoistSnapshot:
 
             tasks = await client.get_paginated("/tasks", params={"limit": 200}, cap=1000)
 
-            # Комментарии тянем ПО ПРОЕКТАМ, а не по задачам: задач около сотни,
-            # проектов шесть. Сто запросов каждую ночь — это плата ни за что.
+            # Комментарии — только у тех задач, у которых они есть. У задачи
+            # есть поле note_count, и по нему сотня запросов превращается
+            # в единицы.
+            #
+            # Первая версия тянула комментарии ПО ПРОЕКТАМ — шесть запросов
+            # вместо ста, красиво и неверно: `/comments?project_id=` отдаёт
+            # комментарии САМОГО проекта, а не его задач. Прогон на живом
+            # аккаунте дал ноль комментариев при 140 задачах, и это поймало
+            # ошибку. Чтением документации она не ловилась.
             comments: dict[str, list[str]] = {}
-            for project_id in names:
+            for task in tasks:
+                if not task.get("note_count"):
+                    continue
                 try:
                     found = await client.get_paginated(
-                        "/comments", params={"project_id": project_id, "limit": 200}
+                        "/comments", params={"task_id": task["id"], "limit": 100}
                     )
                 except TodoistError as err:
-                    log.warning("комментарии проекта %s не забрались: %s", project_id, err)
+                    log.warning("комментарии задачи %s не забрались: %s", task["id"], err)
                     continue
-                for comment in found:
-                    task_id = comment.get("task_id")
-                    if task_id:
-                        comments.setdefault(task_id, []).append(comment.get("content", ""))
+                comments[task["id"]] = [c.get("content", "") for c in found]
 
             yesterday = (_today() - timedelta(days=1)).isoformat()
             today = _today().isoformat()
