@@ -93,6 +93,24 @@ def _тело(path: Path) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(строки)).strip()
 
 
+def _суть(path: Path) -> str:
+    """Только первый содержательный раздел заметки — то, что человек хочет видеть.
+
+    Дашборд — витрина, а не читалка файлов. В заметке миссии после сути идут
+    таблица «откуда взято и что здесь домысел», раздел «что спросить», связи
+    и история обновлений: всё это рабочий материал агента. Владелец открыл файл
+    на телефоне и увидел именно их — значит выводить надо не файл, а суть.
+
+    Берём тело первого `##`-раздела; нет заголовков — берём всё.
+    """
+    текст = _тело(path)
+    разделы = re.split(r"^##\s+.*$", текст, flags=re.M)
+    for кусок in разделы:
+        if кусок.strip():
+            return кусок.strip()
+    return текст
+
+
 def _горизонты(path: Path) -> dict[str, str]:
     """Разделы ГОД / КВАРТАЛ / МЕСЯЦ. Ищем по заголовку, а не по порядку."""
     текст = _тело(path)
@@ -200,7 +218,7 @@ async def собрать(brain_dir: Path, db_path: Path, token: str, дней: i
         ) if _черновик(путь)
     ]
     данные = Данные(
-        миссия=_тело(память / "знания" / "миссия.md"),
+        миссия=_суть(память / "знания" / "миссия.md"),
         черновики=черновики,
         горизонты=_горизонты(память / "состояние" / "горизонты.md"),
         колесо=_колесо(память / "журнал" / "колесо-баланса.md"),
@@ -250,11 +268,34 @@ def _абзацы(текст: str) -> str:
         if all(s.lstrip().startswith(("- ", "* ")) for s in строки):
             пункты = "".join(f"<li>{_строка(s.lstrip()[2:])}</li>" for s in строки)
             куски.append(f"<ul>{пункты}</ul>")
-        elif блок.startswith("###"):
-            куски.append(f"<h4>{_строка(блок.lstrip('# '))}</h4>")
+        elif all(s.strip().startswith("|") for s in строки):
+            куски.append(_таблица(строки))
+        elif блок.startswith("#"):
+            голова, _, хвост = блок.partition("\n")
+            куски.append(f"<h4>{_строка(голова.lstrip('# '))}</h4>")
+            if хвост.strip():
+                куски.append(_абзацы(хвост.strip()))
         else:
-            куски.append("<p>" + "<br>".join(_строка(s) for s in строки) + "</p>")
+            # Одиночный перенос строки — тот же абзац, а не разрыв. Иначе текст
+            # рвётся посередине предложения там, где в файле кончилась строка.
+            куски.append("<p>" + _строка(" ".join(s.strip() for s in строки)) + "</p>")
     return "".join(куски)
+
+
+def _таблица(строки: list[str]) -> str:
+    """Markdown-таблица в HTML. Без этого на телефоне видны сами палки и дефисы."""
+    ряды = [
+        [я.strip() for я in s.strip().strip("|").split("|")]
+        for s in строки
+        if not re.fullmatch(r"\|[\s|:-]+\|", s.strip())
+    ]
+    if not ряды:
+        return ""
+    шапка = "".join(f"<th>{_строка(я)}</th>" for я in ряды[0])
+    тело = "".join(
+        "<tr>" + "".join(f"<td>{_строка(я)}</td>" for я in ряд) + "</tr>" for ряд in ряды[1:]
+    )
+    return f'<div class="обёртка"><table><thead><tr>{шапка}</tr></thead><tbody>{тело}</tbody></table></div>'
 
 
 def _колесо_svg(ряды: list[tuple[str, dict]]) -> str:
@@ -366,7 +407,8 @@ p { margin:0 0 10px; }
 .обёртка { overflow-x:auto; }
 table { border-collapse:collapse; width:100%; font-size:14px; }
 th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--рамка);
-         white-space:nowrap; }
+         vertical-align:top; }
+.плитки + table th, .плитки + table td { white-space:nowrap; }
 tbody th { font-weight:600; white-space:normal; }
 tr.тревога td, tr.тревога th { color:var(--тревога); }
 .плитки { display:grid; gap:10px; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); }
