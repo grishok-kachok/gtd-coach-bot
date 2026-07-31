@@ -63,6 +63,36 @@ LEVELS = {
     "week": ("неделю", "Работа этого уровня — что за неделю сдвинулось, а что застряло и почему."),
     "month": ("месяц", "Работа этого уровня — траектория месяца: куда всё двигалось, а не перечень дел."),
 }
+KIND = {"week": "недельная выжимка", "month": "месячная выжимка"}
+
+# Выжимка — заметка мозга по стандарту Loreground, а не просто текстовый файл.
+# Заголовок писался руками при перестройке памяти в этапе 12, но пишет-то файлы
+# код: первая же новая выжимка вышла бы без заголовка, а валидатор считает такую
+# заметку битой. Тип — `source`: выжимка ничего не утверждает про Василия, она
+# фиксирует сказанное. Корень провенанса — день разговора, у укрупнений корни
+# те дни, из которых их собрали: пересказ своего корня не заводит.
+FRONTMATTER = """---
+title: {title}
+type: source
+schema_version: "1.0"
+status: stable
+created: {created}
+source_type: personal-experience
+reliability: C
+author: {author}
+ref: {ref}
+root_id: [{roots}]
+tags: [выжимка]
+---
+
+"""
+
+# Список выжимок в точке входа собирается кодом между этими метками. Руками
+# его вести нельзя: файлы ротируются каждую ночь, а ссылка на удалённый файл —
+# это битая ссылка, которую валидатор находит, а человек нет.
+INDEX_FILE = "00-index.md"
+INDEX_START = "<!-- начало:выжимки — собирается кодом, src/digest.py -->"
+INDEX_END = "<!-- конец:выжимки -->"
 
 
 @dataclass
@@ -153,7 +183,14 @@ class Digester:
 
         self.paths.days.mkdir(parents=True, exist_ok=True)
         path = self.paths.days / f"{day.isoformat()}.md"
-        path.write_text(f"# {day.isoformat()} — день\n\n{summary}\n", encoding="utf-8")
+        head = FRONTMATTER.format(
+            title=day.isoformat(),
+            created=day.isoformat(),
+            author="Василий (со слов) + агент-коуч (запись)",
+            ref=f"разговор {day.isoformat()}, записан агентом в мозг",
+            roots=f"разговор-{day.isoformat()}",
+        )
+        path.write_text(f"{head}# {day.isoformat()} — день\n\n{summary}\n", encoding="utf-8")
         await self.archive.add_digest("day", day.isoformat(), summary)
         log.info("выжимка дня записана: %s", path)
         return path
@@ -161,9 +198,19 @@ class Digester:
     # --- укрупнение ---
 
     async def _rollup(
-        self, days: list[tuple[str, str]], target: Path, title: str, period: str, period_key: str
+        self,
+        days: list[tuple[str, str]],
+        target: Path,
+        title: str,
+        period: str,
+        period_key: str,
+        closed: date,
     ) -> Path | None:
-        """Собрать уровень из дневных выжимок. Один день — укрупнять нечего."""
+        """Собрать уровень из дневных выжимок. Один день — укрупнять нечего.
+
+        `closed` — последний день периода: из него берётся дата сборки, чтобы
+        заголовок заметки не зависел от того, когда именно запустили код.
+        """
         if len(days) < 2:
             log.info("%s %s: дневных выжимок %d — укрупнять нечего", period, period_key, len(days))
             return None
@@ -172,8 +219,15 @@ class Digester:
         summary = await self._summarize(ROLLUP_PROMPT.format(period=period_name, focus=focus) + body)
         if not summary:
             return None
+        head = FRONTMATTER.format(
+            title=period_key,
+            created=(closed + timedelta(days=1)).isoformat(),
+            author="агент-коуч (сборка из дневных выжимок)",
+            ref=f"{KIND[period]} {period_key}, собрана из дней {days[0][0]} — {days[-1][0]}",
+            roots=", ".join(f"разговор-{key}" for key, _ in days),
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(f"# {title}\n\n{summary}\n", encoding="utf-8")
+        target.write_text(f"{head}# {title}\n\n{summary}\n", encoding="utf-8")
         await self.archive.add_digest(period, period_key, summary)
         log.info("укрупнение записано: %s (дней на входе: %d)", target, len(days))
         return target
@@ -190,7 +244,7 @@ class Digester:
         days = self.archive.day_digests(start.isoformat(), week_end.isoformat())
         target = self.paths.weeks / f"{key}.md"
         title = f"Неделя {key} ({start.isoformat()} — {week_end.isoformat()})"
-        return await self._rollup(days, target, title, "week", key)
+        return await self._rollup(days, target, title, "week", key, closed=week_end)
 
     async def make_month(self, day_of_month: date) -> Path | None:
         """Свернуть календарный месяц, которому принадлежит `day_of_month`.
@@ -204,12 +258,21 @@ class Digester:
         key = first.isoformat()[:7]
         days = self.archive.day_digests(first.isoformat(), last.isoformat())
         target = self.paths.months / f"{key}.md"
-        return await self._rollup(days, target, f"Месяц {key}", "month", key)
+        return await self._rollup(days, target, f"Месяц {key}", "month", key, closed=last)
 
-    # --- ротация файлов ---
+    # --- ротация журнала ---
 
-    def prune(self) -> None:
-        """Держать в журнале то же окно, что видит коуч: 7 дневных файлов и 4 недельных.
+    def rotate(self) -> None:
+        """Привести журнал в мозге к тому же окну, что читает коуч, и починить адреса.
+
+        Два действия неразделимы: удалить файл, оставив ссылку на него в точке
+        входа, — значит завести битую ссылку. Поэтому одна дверь, а не две.
+        """
+        self._prune()
+        self._refresh_index()
+
+    def _prune(self) -> None:
+        """Держать в журнале то же окно, что видит коуч: 7 дневных файлов и 5 недельных.
 
         Удаляются только файлы. Тексты остаются строками в базе (оттуда их берут
         и окно памяти, и укрупнение) и в истории git — потери нет. Месяцы не
@@ -222,3 +285,30 @@ class Digester:
             for path in sorted(folder.glob("*.md"))[:-keep]:
                 path.unlink(missing_ok=True)
                 log.info("файл выжимки убран из журнала: %s", path.name)
+
+    def _refresh_index(self) -> None:
+        """Переписать список выжимок в точке входа памяти между метками.
+
+        Меток нет — молча ничего не делаем и говорим об этом в лог: чужой файл
+        код правит только там, где ему это разрешили явно.
+        """
+        index = self.brain_dir / "память" / INDEX_FILE
+        if not index.exists():
+            return
+        text = index.read_text(encoding="utf-8")
+        if INDEX_START not in text or INDEX_END not in text:
+            log.warning("в %s нет меток списка выжимок — список не обновлён", index)
+            return
+
+        lines = []
+        for folder, name in ((self.paths.months, "месяцы"), (self.paths.weeks, "недели"),
+                             (self.paths.days, "дни")):
+            keys = sorted(path.stem for path in folder.glob("*.md")) if folder.exists() else []
+            if keys:
+                lines.append(" · ".join(f"[[{key}]]" for key in keys) + f" — {name}")
+        block = "\n".join(f"- {line}" for line in lines) or "- пока пусто"
+
+        head, _, rest = text.partition(INDEX_START)
+        _, _, tail = rest.partition(INDEX_END)
+        index.write_text(f"{head}{INDEX_START}\n{block}\n{INDEX_END}{tail}", encoding="utf-8")
+        log.info("список выжимок в точке входа обновлён: %d строк", len(lines))

@@ -520,8 +520,8 @@ class CoachBot:
                     await self.digester.make_week(yesterday)
                 if today.day == 1:  # первое число: вчера закрыло месяц
                     await self.digester.make_month(yesterday)
-                # Журнал держим ровно в том же окне, что читает коуч.
-                self.digester.prune()
+                # Журнал держим в том же окне, что читает коуч, — вместе с адресами.
+                self.digester.rotate()
 
                 await self.brain.push(f"выжимка за {yesterday.isoformat()}")
 

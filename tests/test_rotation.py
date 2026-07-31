@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 
 from src.archive import WINDOW, Archive
-from src.digest import Digester
+from src.digest import INDEX_END, INDEX_START, Digester
 
 
 class Lab:
@@ -42,6 +43,17 @@ class Lab:
             f"# {day.isoformat()} — день\n\n{text}\n", encoding="utf-8"
         )
 
+    def make_index(self) -> Path:
+        """Точка входа памяти с метками, между которыми код ведёт список выжимок."""
+        index = self.brain / "память" / "00-index.md"
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_text(
+            f"# Точка входа\n\n## Источники: выжимки\n\n"
+            f"{INDEX_START}\n- пока пусто\n{INDEX_END}\n\n## Дальше\n",
+            encoding="utf-8",
+        )
+        return index
+
     def night(self, day: date) -> None:
         """Ночной прогон в ночь после `day` — тот же порядок, что в main.nightly_digest."""
         self.live_a_day(day)
@@ -49,7 +61,7 @@ class Lab:
             asyncio.run(self.digester.make_week(day))
         if (day + timedelta(days=1)).day == 1:
             asyncio.run(self.digester.make_month(day))
-        self.digester.prune()
+        self.digester.rotate()
 
 
 @pytest.fixture
@@ -221,3 +233,46 @@ def test_a_year_of_nights_keeps_the_window_steady(lab):
     assert not gaps, "в покрытии дырки: " + "; ".join(
         f"{day} не знает {[d.isoformat() for d in missing]}" for day, missing in list(gaps.items())[:5]
     )
+
+
+# --- заметка, а не просто файл ---
+
+
+def test_digest_files_are_notes_with_frontmatter(lab):
+    """Заголовки заметок писались руками в этапе 12, а файлы пишет код.
+
+    Без этого первая же ночная выжимка легла бы в мозг заметкой без заголовка,
+    и валидатор стандарта посчитал бы её битой.
+    """
+    for i in range(7):
+        lab.archive._add_digest("day", (date(2026, 7, 20) + timedelta(days=i)).isoformat(), f"д{i}")
+    week = asyncio.run(lab.digester.make_week(date(2026, 7, 26)))
+
+    head = week.read_text(encoding="utf-8")
+    assert head.startswith("---\n")
+    assert "title: 2026-W30" in head
+    assert "type: source" in head, "выжимка не утверждает, а фиксирует — это источник"
+    assert "created: 2026-07-27" in head, "дата сборки — из календаря, а не из часов машины"
+    assert "root_id: [разговор-2026-07-20," in head, "корни — дни, из которых собрали"
+
+
+def test_rotation_moves_the_index_links_with_the_files(lab):
+    """Удалить файл и оставить ссылку на него — значит завести битую ссылку."""
+    index = lab.make_index()
+    for i in range(20):
+        lab.night(date(2026, 6, 1) + timedelta(days=i))
+
+    body = index.read_text(encoding="utf-8")
+    assert "[[2026-06-20]]" in body, "свежий день не попал в точку входа"
+    assert "[[2026-06-01]]" not in body, "ссылка осталась на удалённый файл"
+    assert "[[2026-W24]]" in body and "— недели" in body
+    assert body.count(INDEX_START) == 1 and body.count(INDEX_END) == 1
+    assert "## Дальше" in body, "код затёр чужую часть файла"
+
+
+def test_index_without_marks_is_left_alone(lab):
+    index = lab.brain / "память" / "00-index.md"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text("# Точка входа\n\nручной список\n", encoding="utf-8")
+    lab.night(date(2026, 6, 1))
+    assert index.read_text(encoding="utf-8") == "# Точка входа\n\nручной список\n"
