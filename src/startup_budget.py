@@ -58,7 +58,15 @@ def check(brain_dir: Path, loaded: dict[str, int]) -> str:
         if isinstance(size, int) and size and abs(actual - size) > max(200, size * 0.15):
             beefs.append(f"«{what}»: в паспорте {size} Б, на деле {actual} Б")
 
-    total = sum(loaded.values())
+    # Потолок стоит на ВСЕЙ загрузке, а код меряет только свою часть: конституцию,
+    # окно выжимок и сводку дел. Остальное — правила памяти, точку входа, миссию,
+    # ценности, горизонты — грузит движок и модель, и байт их код не видит.
+    # Считать сумму по одному лишь измеренному значило бы никогда не пробить
+    # потолок: недостача в паспорте молча вычиталась бы из перерасхода.
+    # Поэтому берём объявленное и подменяем измеренным там, где измерили.
+    сведённое = dict(declared)
+    сведённое.update({what: actual for what, actual in loaded.items() if what in declared})
+    total = sum(v for v in сведённое.values() if isinstance(v, int))
     if isinstance(budget, int) and total > budget:
         beefs.append(
             f"ПОТОЛОК ПРОБИТ: загрузка {total} Б при потолке {budget} Б. "
