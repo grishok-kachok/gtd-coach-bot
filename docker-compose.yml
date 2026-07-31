@@ -24,7 +24,7 @@ services:
       # клоном отдельного репо (см. volume /opt/pkg ниже). /app первым — код бота.
       - PYTHONPATH=/app:/opt/pkg
     volumes:
-      - ./data/brain:/brain                        # клон coach-brain — общий мозг
+      - ./data/brain:/brain                        # клон gtd-coach-brain — мозг
       - ./data/state:/state                        # закладка разговора (session_id)
       - ./data/claude-config:/home/coach/.claude   # OAuth подписки, переживает рестарт
       - ./data/ssh:/home/coach/.ssh:ro             # deploy-ключ для push в мозг
