@@ -125,7 +125,6 @@ class CoachBot:
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         self.voice = self._voice_recognizer()
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
-        self.memory_days = int(env("MEMORY_DAYS", "30"))
         self.followup_minutes = int(env("FOLLOWUP_MINUTES", "30"))
         self.quiet_hour = int(env("QUIET_HOUR", "23"))  # после этого часа не дожимаем
         self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
@@ -237,7 +236,7 @@ class CoachBot:
             try:
                 await self.brain.pull()
                 # Выжимки прошлых дней движок подставит сам, если разговор начинается заново.
-                memory = await asyncio.to_thread(self.archive.recent_digests, self.memory_days)
+                memory = await asyncio.to_thread(self.archive.recent_digests)
                 answer = await self.engine.ask(text, memory)
                 await self.brain.push(text[:60].replace("\n", " "))
             except Exception as error:  # доставляем боль владельцу, а не в лог-файл
@@ -507,7 +506,8 @@ class CoachBot:
         """
         async with self.lock:
             session_id = self.engine.sessions.load()
-            yesterday = datetime.now(MOSCOW).date() - timedelta(days=1)
+            today = datetime.now(MOSCOW).date()
+            yesterday = today - timedelta(days=1)
             try:
                 await self.brain.pull()
                 # Выжимку делаем всегда: день целиком лежит в архиве, даже если
@@ -515,10 +515,13 @@ class CoachBot:
                 if await self.digester.make_day(session_id, yesterday):
                     self.engine.sessions.clear()
 
+                # Укрупняем только законченные периоды и только по календарю.
                 if yesterday.weekday() == 6:  # воскресенье закрыло неделю
                     await self.digester.make_week(yesterday)
-                if yesterday.day == 1:
+                if today.day == 1:  # первое число: вчера закрыло месяц
                     await self.digester.make_month(yesterday)
+                # Журнал держим ровно в том же окне, что читает коуч.
+                self.digester.prune()
 
                 await self.brain.push(f"выжимка за {yesterday.isoformat()}")
 

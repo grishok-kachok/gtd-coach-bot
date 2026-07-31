@@ -11,13 +11,32 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
 MOSCOW = ZoneInfo("Europe/Moscow")
+
+# Окно памяти — ровно 15 кусков всегда: 7 последних дней, 5 последних полных
+# недель, 3 последних полных месяца. Это решение, а не настройка (PROJECT.md,
+# 31.07.2026): при постоянном количестве размер блока — умножение, известное
+# заранее, и резать никогда ничего не нужно. Пересечение свежей недели
+# с последними днями (0–6 дней) принято осознанно: недельная выжимка не копия
+# дней, а другой уровень детализации.
+#
+# Недель именно ПЯТЬ, а не четыре. Месячная выжимка закрывает месяц только когда
+# он кончился, а четыре недели дотягиваются назад ровно на 28 дней от последнего
+# воскресенья — и если оно пришлось на 29–31 число, между концом прошлого месяца
+# и началом недель остаётся провал в 1–3 дня, которых не знает никто. Найдено
+# прогоном года в tests/test_rotation.py, а не рассуждением; пятая неделя
+# закрывает его при любом календаре.
+WINDOW = {"month": 3, "week": 5, "day": 7}
+
+# От крупного и старого к свежему: так коуч читает историю в ту же сторону,
+# в какую она случалась.
+LABELS = {"month": "Месяц", "week": "Неделя", "day": "День"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -37,7 +56,7 @@ CREATE INDEX IF NOT EXISTS messages_day ON messages(day);
 CREATE TABLE IF NOT EXISTS digests (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     period      TEXT NOT NULL,          -- day | week | month
-    period_key  TEXT NOT NULL,          -- 2026-07-21 | 2026-07-15_2026-07-21 | 2026-07
+    period_key  TEXT NOT NULL,          -- 2026-07-21 | 2026-W30 | 2026-07
     created_at  TEXT NOT NULL,
     text        TEXT NOT NULL,
     UNIQUE(period, period_key)
@@ -139,29 +158,49 @@ class Archive:
             ).fetchone()
         return row is not None
 
-    def recent_digests(self, days: int = 30) -> str:
-        """Память для начала нового разговора: дни за последний месяц, а до них — недели и месяцы.
+    def day_digests(self, start: str, end: str) -> list[tuple[str, str]]:
+        """Дневные выжимки за отрезок включительно — сырьё для укрупнения.
+
+        Неделя и месяц собираются отсюда, а не из файлов и не из уровня выше.
+        Из файлов нельзя: свёрнутые дни с диска убираются, а из базы не пропадают.
+        Из уровня выше нельзя: месяц из недель — пересказ пересказа, он физически
+        не может быть подробнее недель. Из сырья тоже нельзя: месяц разговоров —
+        около 492 000 токенов, он не влезет (замер 31.07.2026).
+        """
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT period_key, text FROM digests WHERE period='day' "
+                "AND period_key BETWEEN ? AND ? ORDER BY period_key",
+                (start, end),
+            ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def window_rows(self) -> list[tuple[str, str, str]]:
+        """Куски окна памяти по порядку: (уровень, ключ, текст).
+
+        Каждый уровень отбирается СВОИМ запросом. Одним запросом нельзя: ключи
+        уровней разного формата (`2026-08`, `2026-W31`, `2026-08-03`), и при
+        сортировке текстом недели вытесняли бы месяцы из общей выборки — так этот
+        код и был сломан до 31.07.2026.
+        """
+        rows: list[tuple[str, str, str]] = []
+        with self._connect() as db:
+            for period, limit in WINDOW.items():
+                picked = db.execute(
+                    "SELECT period_key, text FROM digests WHERE period=? "
+                    "ORDER BY period_key DESC LIMIT ?",
+                    (period, limit),
+                ).fetchall()
+                rows.extend((period, key, text) for key, text in reversed(picked))
+        return rows
+
+    def recent_digests(self) -> str:
+        """Память для начала нового разговора — окно WINDOW, склеенное в текст.
 
         Этот текст подставляется в первый запрос новой сессии, но НЕ пишется в
         архив как сообщение — иначе завтрашний транскрипт вобрал бы вчерашние
         выжимки, и они бы разрастались от пересказа к пересказу.
         """
-        since = (datetime.now(MOSCOW).date() - timedelta(days=days)).isoformat()
-        with self._connect() as db:
-            fresh = db.execute(
-                "SELECT period_key, text FROM digests WHERE period='day' AND period_key>=? "
-                "ORDER BY period_key",
-                (since,),
-            ).fetchall()
-            older = db.execute(
-                "SELECT period, period_key, text FROM digests WHERE period IN ('week','month') "
-                "ORDER BY period_key DESC LIMIT 8"
-            ).fetchall()
-
-        blocks: list[str] = []
-        for period, key, text in reversed(older):
-            label = "Неделя" if period == "week" else "Месяц"
-            blocks.append(f"{label} {key}:\n{text}")
-        for key, text in fresh:
-            blocks.append(f"День {key}:\n{text}")
-        return "\n\n".join(blocks)
+        return "\n\n".join(
+            f"{LABELS[period]} {key}:\n{text}" for period, key, text in self.window_rows()
+        )

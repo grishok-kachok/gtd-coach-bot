@@ -2,8 +2,10 @@
 
 Смысл — не ждать, пока движок сам сожмёт разговор при упоре в лимит (тогда
 он режет вслепую и теряет мелочи), а раз в сутки перечитать день целиком самой
-умной моделью и оставить плотный конспект. Дальше конспекты сами укрупняются:
-дни → недели → месяцы. Так память за месяцы влезает в любой разговор.
+умной моделью и оставить плотный конспект. Из этих дневных конспектов —
+и только из них — собираются недели и месяцы: каждый уровень строится из ДНЕЙ,
+а не из уровня выше. Так подробность уровня остаётся решением, а не следствием.
+Читает коуч ровно 15 кусков: 7 дней, 5 недель, 3 месяца (см. WINDOW в archive.py).
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from claude_agent_sdk import (
     query,
 )
 
-from .archive import Archive
+from .archive import WINDOW, Archive
 
 log = logging.getLogger(__name__)
 
@@ -43,16 +45,24 @@ DAY_PROMPT = """Ниже — стенограмма сегодняшнего р�
 
 """
 
-ROLLUP_PROMPT = """Ниже — выжимки за период ({period}). Сделай из них одну обобщённую выжимку.
+ROLLUP_PROMPT = """Ниже — дневные выжимки за {period}. Сделай из них одну обобщённую выжимку.
 
+- {focus}
 - Убери повседневный шум, оставь линии: что двигалось, что застряло, что решили.
 - Сохрани конкретику по срокам, деньгам, договорённостям и результатам.
 - Отдельно — устойчивые наблюдения про Василия (паттерны, а не разовые эпизоды).
 - Простой текст, без markdown-заголовков. 15–30 строк.
 
-Выжимки:
+Дневные выжимки:
 
 """
+
+# У каждого уровня своя работа, иначе месяц получается пересказом недели.
+# День — факты; неделя — что сдвинулось и что застряло; месяц — траектория.
+LEVELS = {
+    "week": ("неделю", "Работа этого уровня — что за неделю сдвинулось, а что застряло и почему."),
+    "month": ("месяц", "Работа этого уровня — траектория месяца: куда всё двигалось, а не перечень дел."),
+}
 
 
 @dataclass
@@ -151,51 +161,64 @@ class Digester:
     # --- укрупнение ---
 
     async def _rollup(
-        self, sources: list[Path], target: Path, title: str, period: str, period_key: str
+        self, days: list[tuple[str, str]], target: Path, title: str, period: str, period_key: str
     ) -> Path | None:
-        if len(sources) < 2:
+        """Собрать уровень из дневных выжимок. Один день — укрупнять нечего."""
+        if len(days) < 2:
+            log.info("%s %s: дневных выжимок %d — укрупнять нечего", period, period_key, len(days))
             return None
-        body = "\n\n---\n\n".join(p.read_text(encoding="utf-8") for p in sorted(sources))
-        summary = await self._summarize(ROLLUP_PROMPT.format(period=period) + body)
+        body = "\n\n---\n\n".join(f"{key}:\n{text}" for key, text in days)
+        period_name, focus = LEVELS[period]
+        summary = await self._summarize(ROLLUP_PROMPT.format(period=period_name, focus=focus) + body)
         if not summary:
             return None
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f"# {title}\n\n{summary}\n", encoding="utf-8")
         await self.archive.add_digest(period, period_key, summary)
-        log.info("укрупнение записано: %s", target)
+        log.info("укрупнение записано: %s (дней на входе: %d)", target, len(days))
         return target
 
     async def make_week(self, week_end: date) -> Path | None:
-        """Собрать прошедшую неделю в одну запись и убрать дни за неё."""
+        """Свернуть календарную неделю Пн–Вс, которая закончилась `week_end`.
+
+        Ключ — номер ISO (`2026-W30`), а не диапазон дат: диапазон сортировался
+        текстом вперемешку с ключами месяцев и вытеснял их из окна памяти.
+        """
         start = week_end - timedelta(days=6)
-        days = [
-            path
-            for path in self.paths.days.glob("*.md")
-            if start.isoformat() <= path.stem <= week_end.isoformat()
-        ] if self.paths.days.exists() else []
-
-        key = f"{start.isoformat()}_{week_end.isoformat()}"
+        iso = week_end.isocalendar()
+        key = f"{iso.year}-W{iso.week:02d}"
+        days = self.archive.day_digests(start.isoformat(), week_end.isoformat())
         target = self.paths.weeks / f"{key}.md"
-        result = await self._rollup(days, target, f"Неделя {start} — {week_end}", "week", key)
-        if result:
-            for path in days:
-                path.unlink(missing_ok=True)
-        return result
+        title = f"Неделя {key} ({start.isoformat()} — {week_end.isoformat()})"
+        return await self._rollup(days, target, title, "week", key)
 
-    async def make_month(self, any_day_of_month: date) -> Path | None:
-        """Свернуть недели прошедшего месяца — так память старше месяца ужимается сильнее."""
-        first = any_day_of_month.replace(day=1)
-        prefix_start = (first - timedelta(days=1)).replace(day=1)
-        weeks = [
-            path
-            for path in self.paths.weeks.glob("*.md")
-            if path.stem[:7] == prefix_start.isoformat()[:7]
-        ] if self.paths.weeks.exists() else []
+    async def make_month(self, day_of_month: date) -> Path | None:
+        """Свернуть календарный месяц, которому принадлежит `day_of_month`.
 
-        key = prefix_start.isoformat()[:7]
+        Именно календарный: раньше месяц собирался из недель, которые в нём
+        *начались*, — и неделя 29 июня – 5 июля числилась июньской, а первых
+        пяти дней июля в июльском месяце не было вовсе.
+        """
+        first = day_of_month.replace(day=1)
+        last = (first + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+        key = first.isoformat()[:7]
+        days = self.archive.day_digests(first.isoformat(), last.isoformat())
         target = self.paths.months / f"{key}.md"
-        result = await self._rollup(weeks, target, f"Месяц {key}", "month", key)
-        if result:
-            for path in weeks:
+        return await self._rollup(days, target, f"Месяц {key}", "month", key)
+
+    # --- ротация файлов ---
+
+    def prune(self) -> None:
+        """Держать в журнале то же окно, что видит коуч: 7 дневных файлов и 4 недельных.
+
+        Удаляются только файлы. Тексты остаются строками в базе (оттуда их берут
+        и окно памяти, и укрупнение) и в истории git — потери нет. Месяцы не
+        трогаем: их дюжина в год, это долгая память, которую человек листает
+        руками.
+        """
+        for folder, keep in ((self.paths.days, WINDOW["day"]), (self.paths.weeks, WINDOW["week"])):
+            if not folder.exists():
+                continue
+            for path in sorted(folder.glob("*.md"))[:-keep]:
                 path.unlink(missing_ok=True)
-        return result
+                log.info("файл выжимки убран из журнала: %s", path.name)
