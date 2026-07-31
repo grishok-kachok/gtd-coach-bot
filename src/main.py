@@ -575,7 +575,7 @@ class CoachBot:
             "окно выжимок — 15 кусков всегда (7 дней + 5 недель + 3 месяца)": len(
                 memory.encode("utf-8")
             ),
-            "сводка дел: агрегат Todoist к каждой реплике": len(summary.encode("utf-8")),
+            "сводка дел — агрегат Todoist к каждой реплике": len(summary.encode("utf-8")),
         })
         if beef:
             log.warning("стартовая загрузка разошлась с паспортом: %s", beef)
