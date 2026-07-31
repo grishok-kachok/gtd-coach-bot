@@ -41,6 +41,8 @@ from claude_agent_sdk import (
     query,
 )
 
+from .notes import append
+
 log = logging.getLogger(__name__)
 
 PROMPT = """Ниже — что коуч знает про Василия сегодня, и стенограмма разговора за {day}.
@@ -90,26 +92,6 @@ PROMPT = """Ниже — что коуч знает про Василия сег
 
 PROPOSALS = "предложения-памяти.md"
 MISSES = "промахи-памяти.md"
-
-HEAD = """---
-title: {title}
-type: source
-schema_version: "1.0"
-status: stable
-created: {created}
-source_type: personal-experience
-reliability: C
-author: агент-коуч (ночная проверка памяти)
-ref: {ref}
-root_id: [{root}]
-tags: [проверка-памяти]
----
-
-# {heading}
-
-> {note}
-
-"""
 
 
 class MemoryWatch:
@@ -164,20 +146,6 @@ class MemoryWatch:
                     lines.append(body)
         return lines
 
-    def _append(self, name: str, title: str, heading: str, note: str, ref: str,
-                day: date, block: str) -> Path:
-        path = self.journal / name
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                HEAD.format(title=title, created=day.isoformat(), ref=ref,
-                            root=f"разговор-{day.isoformat()}", heading=heading, note=note),
-                encoding="utf-8",
-            )
-        with path.open("a", encoding="utf-8") as f:
-            f.write(block)
-        return path
-
     async def run(self, day: date, transcript: str) -> dict[str, int]:
         """Перечитать день глазами памяти. Возвращает, сколько чего нашлось."""
         if len(transcript) < 200:
@@ -198,23 +166,27 @@ class MemoryWatch:
             if conclusions:
                 block += "**Выводы коуча — сначала спросить Василия:**\n"
                 block += "".join(f"- {item}\n" for item in conclusions) + "\n"
-            self._append(
-                PROPOSALS, "предложения-памяти", "Что стоит записать в память",
-                "Собирает ночной прогон (`src/memory_watch.py`). Это ВХОДЯЩИЕ, а не память: "
-                "факты со слов Василия коуч переносит в `знания/` сам, выводы — только "
-                "после того, как Василий подтвердил. Перенёс — вычеркни строку здесь.",
-                "ночная проверка памяти, накопительный список", day, block,
+            append(
+                self.journal / PROPOSALS, day=day, block=block,
+                title="предложения-памяти", heading="Что стоит записать в память",
+                note="Собирает ночной прогон (`src/memory_watch.py`). Это ВХОДЯЩИЕ, а не память: "
+                     "факты со слов Василия коуч переносит в `знания/` сам, выводы — только "
+                     "после того, как Василий подтвердил. Перенёс — вычеркни строку здесь.",
+                ref="ночная проверка памяти, накопительный список",
+                author="агент-коуч (ночная проверка памяти)", tags="проверка-памяти",
             )
 
         if misses:
             block = f"\n## {day.isoformat()}\n\n" + "".join(f"- {item}\n" for item in misses)
-            self._append(
-                MISSES, "промахи-памяти", "Копилка промахов памяти",
-                "Собирает ночной прогон (`src/memory_watch.py`). Промах — наблюдаемое событие: "
-                "коуч полез в архив за тем, что должно было быть в памяти, или переспросил "
-                "сказанное. Это улики для человека в мастерской: по ним меняются критерии "
-                "выжимки. Бот свои критерии не меняет.",
-                "ночная проверка памяти, накопительный список улик", day, block,
+            append(
+                self.journal / MISSES, day=day, block=block,
+                title="промахи-памяти", heading="Копилка промахов памяти",
+                note="Собирает ночной прогон (`src/memory_watch.py`). Промах — наблюдаемое событие: "
+                     "коуч полез в архив за тем, что должно было быть в памяти, или переспросил "
+                     "сказанное. Это улики для человека в мастерской: по ним меняются критерии "
+                     "выжимки. Бот свои критерии не меняет.",
+                ref="ночная проверка памяти, накопительный список улик",
+                author="агент-коуч (ночная проверка памяти)", tags="проверка-памяти",
             )
 
         found = {"факты": len(facts), "выводы": len(conclusions), "промахи": len(misses)}

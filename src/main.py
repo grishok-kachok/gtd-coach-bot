@@ -29,7 +29,9 @@ from .digest import Digester
 from .engine import CoachEngine
 from .memory_watch import MemoryWatch
 from .retry import retry_network
+from .rhythms import describe, path_in, read
 from .sessions import SessionStorage
+from .startup_budget import check as check_budget
 from .tidy_history import HistoryTidier
 from .voice import (
     DEFAULT_STT_MODEL,
@@ -133,11 +135,14 @@ class CoachBot:
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         self.voice = self._voice_recognizer()
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
-        self.followup_minutes = int(env("FOLLOWUP_MINUTES", "30"))
-        self.quiet_hour = int(env("QUIET_HOUR", "23"))  # после этого часа не дожимаем
+        # Ритмы живут в мозге, а не в .env: их меняет Василий фразой в телеграме.
+        self.rhythms, problems = read(self.brain_dir)
+        if problems:
+            log.error("ритмы в мозге сломаны, беру умолчания: %s", "; ".join(problems))
         self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
         self.tidier = HistoryTidier(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
         self.memory_watch = MemoryWatch(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
+        self.broken_rhythms = "; ".join(problems)
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
 
@@ -248,7 +253,9 @@ class CoachBot:
                 memory = await asyncio.to_thread(self.archive.recent_digests)
                 # Сводку дел — к каждой реплике: коуч обязан знать картину дня всегда,
                 # а не когда вспомнит сходить в Todoist.
-                answer = await self.engine.ask(text, memory, await agenda.summary(self.todoist_token))
+                summary = await agenda.summary(self.todoist_token)
+                self._check_load(memory, summary)
+                answer = await self.engine.ask(text, memory, summary)
                 await self.brain.push(text[:60].replace("\n", " "))
             except Exception as error:  # доставляем боль владельцу, а не в лог-файл
                 log.exception("сорвалось на ответе")
@@ -256,6 +263,10 @@ class CoachBot:
             finally:
                 typing.cancel()
             await self.archive.add_message("coach", channel, answer, self.engine.sessions.load())
+
+        # Коуч мог только что поменять ритмы по просьбе Василия — заметить это надо
+        # сразу, а не через час: «пиши мне три раза в день» должно работать как фраза.
+        await self._reread_rhythms(context, loud=True)
 
         for chunk in self._split(answer):
             await context.bot.send_message(chat_id=chat_id, text=chunk)
@@ -485,7 +496,7 @@ class CoachBot:
             return
         context.job_queue.run_once(
             self.follow_up,
-            when=timedelta(minutes=self.followup_minutes),
+            when=timedelta(minutes=self.rhythms["дожим_минут"]),
             data=(sent_at, attempt),
             name=f"дожим-{attempt}",
         )
@@ -501,7 +512,7 @@ class CoachBot:
             log.info("дожим %s не нужен: Василий отозвался", attempt)
             return
         now = datetime.now(MOSCOW)
-        if now.hour >= self.quiet_hour or now.hour < 8:
+        if now.hour >= self.rhythms["тихий_час"] or now.hour < 8:
             log.info("дожим %s отменён: время тихое (%s)", attempt, now.strftime("%H:%M"))
             return
         await self._think_and_reply(
@@ -547,6 +558,84 @@ class CoachBot:
             except Exception:
                 log.exception("ночная выжимка сорвалась")
 
+
+    def _check_load(self, memory: str, summary: str) -> None:
+        """Сверить то, что реально кладём в контекст, с паспортом памяти.
+
+        Считаем только когда память подставляется — то есть в первый запрос новой
+        сессии. В середине разговора выжимки не грузятся, и «сумма» была бы
+        не той величиной, о которой говорит паспорт.
+        """
+        if not memory or self.engine.sessions.load():
+            return
+        beef = check_budget(self.brain_dir, {
+            "конституция коуча (роль, тон, что делать с делами)": len(
+                self.engine.system_prompt.encode("utf-8")
+            ),
+            "окно выжимок — 15 кусков всегда (7 дней + 5 недель + 3 месяца)": len(
+                memory.encode("utf-8")
+            ),
+            "сводка дел: агрегат Todoist к каждой реплике": len(summary.encode("utf-8")),
+        })
+        if beef:
+            log.warning("стартовая загрузка разошлась с паспортом: %s", beef)
+
+    # --- ритмы ---
+
+    ALARMS = {
+        "утро": ("утро", MORNING_PROMPT, "morning"),
+        "день": ("день", MIDDAY_PROMPT, "midday"),
+        "вечер": ("вечер", EVENING_PROMPT, "evening"),
+    }
+
+    def _hang_alarms(self, queue) -> None:
+        """Перевесить будильники по нынешним ритмам. Старые снимаются по имени."""
+        for name in list(self.ALARMS) + ["выжимка"]:
+            for job in queue.get_jobs_by_name(name):
+                job.schedule_removal()
+        for key, (name, prompt, channel) in self.ALARMS.items():
+            queue.run_daily(
+                self.ping, time=_parse(self.rhythms[key], MOSCOW),
+                data=(prompt, channel), name=name,
+            )
+        queue.run_daily(
+            self.nightly_digest, time=_parse(self.rhythms["ночная_выжимка"], MOSCOW), name="выжимка"
+        )
+
+    async def _reread_rhythms(self, context: ContextTypes.DEFAULT_TYPE, loud: bool) -> None:
+        """Перечитать файл ритмов и, если он изменился, перевесить будильники.
+
+        `loud` — говорить ли Василию. После его собственной реплики говорим: он
+        только что попросил поменять расписание и должен увидеть, что вышло.
+        Из часового сторожа молчим про «всё по-прежнему», но про поломку — всегда.
+        """
+        fresh, problems = read(self.brain_dir)
+        if problems:
+            beef = "; ".join(problems)
+            log.error("ритмы в мозге сломаны: %s", beef)
+            if self.broken_rhythms != beef:
+                self.broken_rhythms = beef
+                await context.bot.send_message(
+                    chat_id=self.owner_id,
+                    text=(f"Файл ритмов не читается, живу по прежнему расписанию.\n{beef}\n\n"
+                          f"Адрес: {path_in(self.brain_dir)}"),
+                )
+            return
+        self.broken_rhythms = ""
+        if fresh == self.rhythms:
+            return
+        changes = describe(fresh, self.rhythms)
+        self.rhythms = fresh
+        self._hang_alarms(context.job_queue)
+        log.info("ритмы перечитаны: %s", changes)
+        if loud:
+            await context.bot.send_message(
+                chat_id=self.owner_id, text=f"Расписание переставил: {changes}."
+            )
+
+    async def watch_rhythms(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._reread_rhythms(context, loud=False)
+
     # --- пульс ---
 
     async def heartbeat(self, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -576,16 +665,13 @@ class CoachBot:
         application.add_error_handler(self.on_error)
 
         queue = application.job_queue
-        morning = env("MORNING_TIME", "10:00")
-        midday = env("MIDDAY_TIME", "14:30")
-        evening = env("EVENING_TIME", "20:00")
-        queue.run_daily(self.ping, time=_parse(morning, MOSCOW), data=(MORNING_PROMPT, "morning"), name="утро")
-        queue.run_daily(self.ping, time=_parse(midday, MOSCOW), data=(MIDDAY_PROMPT, "midday"), name="день")
-        queue.run_daily(self.ping, time=_parse(evening, MOSCOW), data=(EVENING_PROMPT, "evening"), name="вечер")
-        queue.run_daily(self.nightly_digest, time=_parse(env("DIGEST_TIME", "03:00"), MOSCOW), name="выжимка")
+        self._hang_alarms(queue)
         queue.run_repeating(self.heartbeat, interval=60, first=1, name="пульс")
+        # Сторож на случай, когда файл ритмов приехал со стороны — например, git pull
+        # притащил правку с другой машины. Разговор такую правку не заметит.
+        queue.run_repeating(self.watch_rhythms, interval=3600, first=3600, name="сторож ритмов")
 
-        log.info("коуч поднялся: пинги %s, %s и %s по Москве, владелец %s", morning, midday, evening, self.owner_id)
+        log.info("коуч поднялся: %s, владелец %s", describe(self.rhythms), self.owner_id)
         # Вебхуки в РФ не годятся — Telegram их не достучится, работаем поллингом.
         # Накопленное НЕ выбрасываем: бота перезапускает сторож «бот оглох» именно
         # тогда, когда очередь не разбирается, — и флаг «выбросить» уничтожал бы

@@ -21,6 +21,7 @@ from claude_agent_sdk import (
 from .gcal import build_calendar_server
 from .sessions import SessionStorage
 from .todoist import build_todoist_server
+from .wishes import build_wishes_server
 
 log = logging.getLogger(__name__)
 
@@ -66,12 +67,14 @@ class CoachEngine:
         # умолчанию видит только cwd — без этого списка он до них не дотянется.
         self.extra_dirs = [str(path) for path in (extra_dirs or [])]
         self.todoist_server = build_todoist_server(todoist_token)
+        # Заявки: «хочу, чтобы ты умел X» — коуч записывает, а не делает.
+        self.wishes_server = build_wishes_server(brain_dir)
         # Календарь подключаем только когда заданы креды — без них бот работает как прежде.
         self.calendar_server = build_calendar_server(**calendar) if calendar else None
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:
-        mcp_servers = {"todoist": self.todoist_server}
-        allowed = MEMORY_TOOLS + ["mcp__todoist"]
+        mcp_servers = {"todoist": self.todoist_server, "wishes": self.wishes_server}
+        allowed = MEMORY_TOOLS + ["mcp__todoist", "mcp__wishes"]
         if self.calendar_server is not None:
             mcp_servers["calendar"] = self.calendar_server
             allowed = allowed + ["mcp__calendar"]
