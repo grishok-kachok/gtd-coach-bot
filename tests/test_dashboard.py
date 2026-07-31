@@ -37,8 +37,13 @@ class ПоддельныйTodoist:
         return False
 
     async def get_paginated(self, path, params=None, key="results", cap=300):
-        assert path == "/labels"
-        return self.labels
+        assert path == "/tasks"
+        return [
+            {"id": f"t{i}", "content": з.get("content", ""), "labels": [м],
+             "due": з.get("due")}
+            for м, задачи in self.tasks.items() if м.startswith("@цель-")
+            for i, з in enumerate(задачи)
+        ]
 
     async def get(self, path, params=None):
         assert path == "/tasks/filter"
@@ -102,19 +107,6 @@ def test_шапка_заметки_не_попадает_на_страницу(�
 
     assert "Быть отцом и учителем." in страница
     assert "schema_version" not in страница and "type: знание" not in страница
-
-
-def test_спящая_цель_подсвечена(мозг, monkeypatch):
-    todoist = ПоддельныйTodoist(
-        labels=[{"name": "цель-6поток"}, {"name": "актив"}],
-        tasks={"@цель-6поток": [{"content": "Программа", "due": None}]},
-    )
-    данные = собрать(мозг, todoist, monkeypatch)
-    страница = dashboard.нарисовать(данные, date(2026, 8, 1))
-
-    assert данные.цели == [{"имя": "6поток", "всего": 1, "с_датой": 0, "ближайший": ""}]
-    assert "тревога" in страница and "— спит" in страница
-    assert "актив" not in [ц["имя"] for ц in данные.цели], "обычная метка не цель"
 
 
 def test_колесо_рисуется_из_ямл_блока(мозг, monkeypatch):
@@ -256,3 +248,44 @@ def test_одиночный_перенос_не_рвёт_предложение(
     страница = dashboard.нарисовать(данные, date(2026, 8, 1))
     assert "Довести поток до конца августа." in страница
     assert "<br>" not in страница
+
+
+def test_работа_по_цели_это_карточка_плюс_подзадачи(мозг, monkeypatch):
+    """Метка на подзадачи не наследуется, а карточка-замысел по методологии
+    без даты. Считать только помеченное — значит объявить спящей цель «Бали»
+    с тридцатью задачами (проверено на живом аккаунте 31.07)."""
+
+    class Todoist(ПоддельныйTodoist):
+        async def get_paginated(self, path, params=None, key="results", cap=300):
+            assert path == "/tasks"
+            return [
+                {"id": "к", "content": "* ✈️ Бали", "labels": ["цель-бали"], "due": None},
+                {"id": "п1", "content": "Визы", "parent_id": "к", "labels": [],
+                 "due": {"date": "2026-09-01"}},
+                {"id": "в1", "content": "Фото на визу", "parent_id": "п1", "labels": [],
+                 "due": {"date": "2026-08-20"}},
+                {"id": "чужая", "content": "Купить лампочку", "labels": [], "due": None},
+            ]
+
+    данные = собрать(мозг, Todoist(), monkeypatch)
+    assert данные.цели == [
+        {"имя": "бали", "всего": 3, "с_датой": 2, "ближайший": "2026-08-20"}
+    ]
+
+    страница = dashboard.нарисовать(данные, date(2026, 8, 1))
+    assert "— спит" not in страница, "цель с датами не может быть спящей"
+    assert dict((и, ф) for и, ф, _ in данные.приборы)["Спящие цели"] == 0
+
+
+def test_спящей_считается_цель_без_единой_даты(мозг, monkeypatch):
+    class Todoist(ПоддельныйTodoist):
+        async def get_paginated(self, path, params=None, key="results", cap=300):
+            return [
+                {"id": "к", "content": "* 🚀 6 поток", "labels": ["цель-6поток"], "due": None},
+                {"id": "п", "content": "Программа", "parent_id": "к", "labels": [], "due": None},
+            ]
+
+    данные = собрать(мозг, Todoist(), monkeypatch)
+    assert данные.цели[0]["с_датой"] == 0
+    assert dict((и, ф) for и, ф, _ in данные.приборы)["Спящие цели"] == 1
+    assert "— спит" in dashboard.нарисовать(данные, date(2026, 8, 1))
