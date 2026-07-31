@@ -22,10 +22,12 @@ from telegram.ext import (
     filters,
 )
 
+from . import agenda
 from .archive import Archive
 from .brain import Brain
 from .digest import Digester
 from .engine import CoachEngine
+from .memory_watch import MemoryWatch
 from .retry import retry_network
 from .sessions import SessionStorage
 from .tidy_history import HistoryTidier
@@ -64,7 +66,12 @@ MORNING_PROMPT = (
     "выполненные задачи. Дальше действуй по правилам раздела «Когда пишешь первым»: "
     "главное дело дня и почему именно сегодня, вчерашние победы одной строкой (если "
     "были), светофор только по действительно критичным задачам — и возьми с Василия "
-    "обещание дня. Сочини сообщение заново, живым языком, без шаблона."
+    "обещание дня. Сочини сообщение заново, живым языком, без шаблона.\n\n"
+    "Отдельно загляни в память/журнал/предложения-памяти.md — ночью туда могло лечь "
+    "то, что стоит записать про Василия. Факты с его же слов перенеси в память сам "
+    "и вычеркни строку. А вот вывод, который ты сделал за него, молча не записывай: "
+    "вплети про него ОДИН вопрос в чек-ин, и только с ответом переноси. Ничего "
+    "не нашлось — молчи об этом, отчитываться о пустой проверке не надо."
 )
 
 MIDDAY_PROMPT = (
@@ -112,11 +119,12 @@ class CoachBot:
         state_dir = Path(env("STATE_DIR", "/state"))
 
         self.brain = Brain(self.brain_dir)
+        self.todoist_token = env("TODOIST_API_TOKEN", required=True)
         self.engine = CoachEngine(
             brain_dir=self.brain_dir,
             session_storage=SessionStorage(state_dir / "session_id"),
             system_prompt=self._system_prompt(),
-            todoist_token=env("TODOIST_API_TOKEN", required=True),
+            todoist_token=self.todoist_token,
             model=env("COACH_MODEL", "claude-fable-5"),
             effort=env("COACH_EFFORT", "medium"),
             calendar=self._calendar_config(),
@@ -129,6 +137,7 @@ class CoachBot:
         self.quiet_hour = int(env("QUIET_HOUR", "23"))  # после этого часа не дожимаем
         self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
         self.tidier = HistoryTidier(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
+        self.memory_watch = MemoryWatch(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
 
@@ -237,7 +246,9 @@ class CoachBot:
                 await self.brain.pull()
                 # Выжимки прошлых дней движок подставит сам, если разговор начинается заново.
                 memory = await asyncio.to_thread(self.archive.recent_digests)
-                answer = await self.engine.ask(text, memory)
+                # Сводку дел — к каждой реплике: коуч обязан знать картину дня всегда,
+                # а не когда вспомнит сходить в Todoist.
+                answer = await self.engine.ask(text, memory, await agenda.summary(self.todoist_token))
                 await self.brain.push(text[:60].replace("\n", " "))
             except Exception as error:  # доставляем боль владельцу, а не в лог-файл
                 log.exception("сорвалось на ответе")
@@ -514,6 +525,11 @@ class CoachBot:
                 # ленту разговора сбросили через /new и session_id уже пуст.
                 if await self.digester.make_day(session_id, yesterday):
                     self.engine.sessions.clear()
+
+                # Второй вопрос к тому же дню — уже про саму память: что пора
+                # записать и где она сегодня подвела. Просьба в тексте конституции
+                # («увидел паттерн — допиши») не срабатывала; будильник срабатывает.
+                await self.memory_watch.run(yesterday, self.digester.transcript_of(yesterday))
 
                 # Укрупняем только законченные периоды и только по календарю.
                 if yesterday.weekday() == 6:  # воскресенье закрыло неделю

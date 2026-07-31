@@ -165,7 +165,8 @@ class Digester:
                 lines.append(f"{who}: {text}")
         return "\n\n".join(lines)
 
-    def _transcript_from_archive(self, day: date) -> str:
+    def transcript_of(self, day: date) -> str:
+        """Сырьё разговора за день — им кормится и выжимка, и ночная проверка памяти."""
         lines = []
         for role, channel, source, text in self.archive.messages_of_day(day.isoformat()):
             who = "Василий" if role == "vasiliy" else "Коуч"
@@ -177,7 +178,7 @@ class Digester:
 
     async def make_day(self, session_id: str | None, day: date) -> Path | None:
         # Архив — основной источник: он переживает и обнуление сессии, и пересборку контейнера.
-        transcript = self._transcript_from_archive(day)
+        transcript = self.transcript_of(day)
         if len(transcript) < 200 and session_id:
             transcript = self._transcript(session_id)
         if len(transcript) < 200:

@@ -90,15 +90,19 @@ class CoachEngine:
             plugins=PLUGINS,
         )
 
-    async def ask(self, text: str, memory: str = "") -> str:
+    async def ask(self, text: str, memory: str = "", agenda: str = "") -> str:
         """Задать вопрос, продолжая прошлый разговор.
 
         Разговор начинается заново каждую ночь, поэтому в первый запрос новой
         сессии подкладываем выжимки прошлых дней — иначе коуч проснётся с
         чистой головой и заставит Василия пересказывать вчерашнее.
+
+        Сводка дел подкладывается к КАЖДОЙ реплике, а не только к первой: дела
+        меняются в течение дня, в том числе руками самого коуча. Это пара сотен
+        токенов — цена того, чтобы он никогда не рассуждал о вчерашней картине.
         """
         resume = self.sessions.load()
-        prompt = text if resume else self._with_memory(text, memory)
+        prompt = self._wrap(text, memory if not resume else "", agenda)
         try:
             return await self._run(prompt, resume)
         except Exception:
@@ -108,20 +112,29 @@ class CoachEngine:
             # чтобы бот не онемел из-за одной битой ссылки.
             log.warning("не удалось продолжить сессию %s, начинаю новую", resume, exc_info=True)
             self.sessions.clear()
-            return await self._run(self._with_memory(text, memory), None)
+            return await self._run(self._wrap(text, memory, agenda), None)
 
     @staticmethod
-    def _with_memory(text: str, memory: str) -> str:
-        if not memory.strip():
-            return text
-        return (
-            "<память_прошлых_дней>\n"
-            "Это твои же выжимки прошлых разговоров с Василием — самые свежие внизу.\n"
-            "Опирайся на них молча: не пересказывай их и не ссылайся на них вслух.\n\n"
-            f"{memory}\n"
-            "</память_прошлых_дней>\n\n"
-            f"{text}"
-        )
+    def _wrap(text: str, memory: str, agenda: str) -> str:
+        blocks = []
+        if memory.strip():
+            blocks.append(
+                "<память_прошлых_дней>\n"
+                "Это твои же выжимки прошлых разговоров с Василием — самые свежие внизу.\n"
+                "Опирайся на них молча: не пересказывай их и не ссылайся на них вслух.\n\n"
+                f"{memory}\n"
+                "</память_прошлых_дней>"
+            )
+        if agenda.strip():
+            blocks.append(
+                "<дела_сейчас>\n"
+                "Свежий агрегат из Todoist, собран кодом только что. Todoist — дом дел,\n"
+                "это его отражение: правится источник, а не отражение.\n\n"
+                f"{agenda}\n"
+                "</дела_сейчас>"
+            )
+        blocks.append(text)
+        return "\n\n".join(blocks)
 
     async def _run(self, text: str, resume: str | None, *, second_try: bool = False) -> str:
         parts: list[str] = []
