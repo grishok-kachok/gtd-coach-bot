@@ -1,7 +1,7 @@
 """Инструменты Todoist для движка бота — обёртка над манифестом кнопок.
 
 Здесь не объявлено ни одной кнопки. Список, описания и поля живут в манифесте
-пакета `todoist-mcp` (`coach_todoist_mcp.tools`), логика — в его же `core.py`.
+пакета `todoist-mcp` (`todoist_mcp.tools`), логика — в его же `core.py`.
 Этот файл только разворачивает манифест в инструменты Claude Agent SDK.
 
 Почему обёрток всё-таки две. Движки принимают разные типы: MCP-сервер умеет
@@ -27,9 +27,9 @@ import logging
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
-from coach_todoist_mcp import plan as plan_module
-from coach_todoist_mcp import tools as manifest
-from coach_todoist_mcp.client import TodoistClient, TodoistError
+from todoist_mcp import plan as plan_module
+from todoist_mcp import tools as manifest
+from todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 

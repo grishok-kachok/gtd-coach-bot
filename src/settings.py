@@ -57,7 +57,7 @@ def known_button_names() -> tuple[set[str], set[str]]:
     проверять не с чем, и лишние имена просто не ловятся.
     """
     try:
-        from coach_todoist_mcp import tools as todoist_tools
+        from todoist_mcp import tools as todoist_tools
         todoist = {t.name for t in todoist_tools.TOOLS}
     except Exception:
         todoist = set()

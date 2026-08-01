@@ -25,7 +25,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from coach_todoist_mcp.client import TodoistClient, TodoistError
+from todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 

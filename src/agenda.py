@@ -20,7 +20,7 @@ import os
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from coach_todoist_mcp.client import TodoistClient, TodoistError
+from todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 

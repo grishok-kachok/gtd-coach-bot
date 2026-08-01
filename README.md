@@ -13,7 +13,7 @@
 | `src/main.py` | Телеграм: поллинг, голос, два пинга в день, ночная выжимка |
 | `src/engine.py` | **Движок**: Claude Agent SDK, непрерывная сессия, инструменты |
 | `src/sessions.py` | Закладка разговора — какой `session_id` продолжать |
-| `src/todoist.py` | Инструменты Todoist — обёртки над ядром `coach_todoist_mcp` |
+| `src/todoist.py` | Инструменты Todoist — обёртки над ядром `todoist_mcp` |
 | `src/voice.py` | Расшифровка голосовых: Groq, при осечке — OpenAI |
 | `src/retry.py` | Повтор сетевых операций: мост моргнул — не потеряли голосовое |
 | `src/brain.py` | Синхронизация памяти через git |

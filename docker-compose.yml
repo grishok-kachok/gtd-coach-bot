@@ -23,19 +23,22 @@ services:
       # Этой переменной движок кладёт его ВНУТРЬ /home/coach/.claude — в том.
       # Проверено живым тестом на движке 2.1.216.
       - CLAUDE_CONFIG_DIR=/home/coach/.claude
-      # Пакет coach-todoist-mcp приезжает не копией в образе, а смонтированным
+      # Пакет todoist-mcp приезжает не копией в образе, а смонтированным
       # клоном отдельного репо (см. volume /opt/pkg ниже). /app первым — код бота.
-      - PYTHONPATH=/app:/opt/pkg
+      - PYTHONPATH=/app:/opt/pkg:/opt/pkg-gcal
     volumes:
       - ./data/brain:/brain                        # клон gtd-coach-brain — мозг
       - ./data/state:/state                        # закладка разговора (session_id)
       - ./data/claude-config:/home/coach/.claude   # OAuth подписки, переживает рестарт
       - ./data/ssh:/home/coach/.ssh:ro             # deploy-ключ для push в мозг
-      # Todoist-код — из отдельного репо vefmvai/coach-todoist-mcp (один дом).
-      # Серверный клон /opt/apps/coach-todoist-mcp обновляется git pull с GitHub
+      # Todoist-код — из отдельного репо vefmvai/todoist-mcp (один дом).
+      # Серверный клон /opt/apps/todoist-mcp обновляется git pull с GitHub
       # (второй read-only deploy-ключ). Монтируем его src → /opt/pkg, PYTHONPATH
-      # видит пакет coach_todoist_mcp. Ключа в образе нет, build-time доступа нет.
-      - /opt/apps/coach-todoist-mcp/src:/opt/pkg:ro
+      # видит пакет todoist_mcp. Ключа в образе нет, build-time доступа нет.
+      - /opt/apps/todoist-mcp/src:/opt/pkg:ro
+      # Календарь — тоже отдельный репозиторий (один дом). До 01.08.2026 он был
+      # питоном внутри образа, и второй канал жил без календаря вовсе.
+      - /opt/apps/gcal-mcp/src:/opt/pkg-gcal:ro
       # Роль коуча — из отдельного репо vefmvai/gtd-coach (один дом). Тем же
       # приёмом, что и Todoist выше: клон на сервере обновляется git pull,
       # монтируется только на чтение. Маркетплейс контейнер не умеет — движок

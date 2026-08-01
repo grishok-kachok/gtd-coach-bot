@@ -32,7 +32,7 @@ from pathlib import Path
 
 import yaml
 
-from coach_todoist_mcp.client import TodoistClient, TodoistError
+from todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 

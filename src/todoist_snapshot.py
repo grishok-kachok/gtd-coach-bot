@@ -40,7 +40,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from coach_todoist_mcp.client import TodoistClient, TodoistError
+from todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 
