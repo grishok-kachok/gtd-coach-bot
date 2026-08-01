@@ -91,43 +91,34 @@ def test_мелочь_не_тащит_подзадачи():
 
 # ── переносы ─────────────────────────────────────────────────────────────────
 
-def _база_с_переносами(tmp_path, сколько: int):
-    import sqlite3
-    путь = tmp_path / "coach.db"
-    with sqlite3.connect(путь) as db:
-        db.execute("CREATE TABLE todoist_diff (day TEXT, kind TEXT, task_id TEXT,"
-                   " content TEXT, detail TEXT)")
-        for i in range(сколько):
-            db.execute("INSERT INTO todoist_diff VALUES(?,?,?,?,?)",
-                       ((date(2026, 8, 1) - timedelta(days=i)).isoformat(),
-                        "перенесена", "t1", "Дожать лендинг", "вчера → сегодня"))
-    return путь
-
-
-def test_три_переноса_это_хроника(tmp_path):
-    найдено = detectors.хронические_переносы(_база_с_переносами(tmp_path, 3))
+def test_три_переноса_это_хроника():
+    задачи = [задача("Дожать лендинг", postponed_count=3)]
+    найдено = detectors.хронические_переносы(задачи)
     assert найдено and "«Дожать лендинг» — 3 раз" in найдено[0].строка
 
 
-def test_два_переноса_ещё_не_хроника(tmp_path):
-    assert detectors.хронические_переносы(_база_с_переносами(tmp_path, 2)) == []
+def test_два_переноса_ещё_не_хроника():
+    assert detectors.хронические_переносы([задача("Почти", postponed_count=2)]) == []
 
 
-def test_старые_переносы_за_окном_не_считаются(tmp_path):
-    import sqlite3
-    путь = tmp_path / "coach.db"
-    with sqlite3.connect(путь) as db:
-        db.execute("CREATE TABLE todoist_diff (day TEXT, kind TEXT, task_id TEXT,"
-                   " content TEXT, detail TEXT)")
-        for i in range(5):
-            db.execute("INSERT INTO todoist_diff VALUES(?,?,?,?,?)",
-                       ((date(2026, 5, 1) + timedelta(days=i)).isoformat(),
-                        "перенесена", "t1", "Древнее", ""))
-    assert detectors.хронические_переносы(путь) == []
+def test_повторяющаяся_задача_не_считается_хроником():
+    """Куплено прогоном 01.08: у «Оплатить интернет каждое 24-е» счётчик
+    показывает 9, хотя её не переносили ни разу — он растёт от повторов.
+    Без этой оговорки прибор объявил бы завалом всю рутину."""
+    рутина = задача("Оплатить интернет", postponed_count=9,
+                    due={"date": "2026-08-24", "is_recurring": True})
+    assert detectors.хронические_переносы([рутина]) == []
 
 
-def test_нет_базы_нет_жалобы(tmp_path):
-    assert detectors.хронические_переносы(tmp_path / "нету.db") == []
+def test_хроники_идут_от_худшего():
+    задачи = [задача("средне", postponed_count=4), задача("совсем плохо", postponed_count=26)]
+    строка = detectors.хронические_переносы(задачи)[0].строка
+    assert строка.index("совсем плохо") < строка.index("средне")
+
+
+def test_поля_переносов_нет_нет_и_жалобы():
+    """Старая задача без счётчика не должна ронять обход."""
+    assert detectors.хронические_переносы([задача("без поля")]) == []
 
 
 # ── нормы приборов ───────────────────────────────────────────────────────────

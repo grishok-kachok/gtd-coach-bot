@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS todoist_closed (
     labels       TEXT NOT NULL DEFAULT '',
     priority     INTEGER,
     due          TEXT NOT NULL DEFAULT '',
+    postponed    INTEGER NOT NULL DEFAULT 0,   -- сколько раз переезжала до закрытия
     PRIMARY KEY (task_id, completed_at)
 );
 
@@ -123,14 +124,18 @@ def _closed_row(task: dict, project: str = "") -> dict:
         "labels": ",".join(task.get("labels") or []),
         "priority": task.get("priority"),
         "due": ((task.get("due") or {}).get("date") or "")[:10],
+        # Считает сам Todoist, и считает исторически — своим снимкам до этого
+        # копить недели. У повторяющихся задач счётчик растёт от каждого
+        # повтора, поэтому потребитель обязан их отсеивать.
+        "postponed": task.get("postponed_count") or 0,
     }
 
 
 CLOSED_INSERT = (
     "INSERT OR REPLACE INTO todoist_closed(task_id, completed_at, content, project,"
-    " added_at, labels, priority, due)"
+    " added_at, labels, priority, due, postponed)"
     " VALUES(:task_id, :completed_at, :content, :project, :added_at, :labels,"
-    " :priority, :due)"
+    " :priority, :due, :postponed)"
 )
 
 
@@ -152,7 +157,8 @@ class TodoistSnapshot:
         for колонка, тип in (("added_at", "TEXT NOT NULL DEFAULT ''"),
                              ("labels", "TEXT NOT NULL DEFAULT ''"),
                              ("priority", "INTEGER"),
-                             ("due", "TEXT NOT NULL DEFAULT ''")):
+                             ("due", "TEXT NOT NULL DEFAULT ''"),
+                             ("postponed", "INTEGER NOT NULL DEFAULT 0")):
             if колонка not in было:
                 db.execute(f"ALTER TABLE todoist_closed ADD COLUMN {колонка} {тип}")
 
@@ -329,6 +335,17 @@ class TodoistSnapshot:
         until = until or _today()
         собрано: list[dict] = []
         async with TodoistClient(self.token) as client:
+            # Имена проектов нужны обязательно. Первый добор их не спрашивал —
+            # «проект мог переименоваться» — и показатель «где идёт работа»
+            # честно показал «закрыто 0» по всем проектам при 56 закрытых
+            # задачах. Пустое поле читается как факт «там ничего не делали»,
+            # хотя означает «мы не спросили»; это хуже неточного имени.
+            try:
+                projects = await client.get_paginated("/projects", params={"limit": 100})
+                names = {p["id"]: p.get("name", "") for p in projects}
+            except TodoistError as err:
+                log.warning("имена проектов для добора не забрались: %s", err)
+                names = {}
             начало = since
             while начало < until:
                 конец = min(_month_after(начало), until)
@@ -345,9 +362,8 @@ class TodoistSnapshot:
                 собрано.extend(куски)
                 начало = конец
 
-        # Имён проектов у исторических задач не спрашиваем: часть проектов уже
-        # переименована или удалена, и подставленное сегодня имя соврало бы про тот день.
-        rows = [_closed_row(t) for t in собрано if t.get("completed_at")]
+        rows = [_closed_row(t, names.get(t.get("project_id"), ""))
+                for t in собрано if t.get("completed_at")]
 
         def _write() -> int:
             with self._connect() as db:
