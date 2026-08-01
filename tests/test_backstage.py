@@ -33,9 +33,14 @@ class ПоддельныйTodoist:
     async def get(self, path, params=None):
         if path == "/projects":
             return {"results": [{"id": "p1", "name": "Рабочее"}]}
+        if path == "/tasks":
+            # Перебор, а не поиск: `search:` у Todoist не находит только что
+            # созданную задачу (прогон 02.08.2026), и правило «одна задача
+            # на копилку» ломалось молча.
+            return {"results": list(self.tasks)}
         if path == "/tasks/filter":
-            искомое = (params or {}).get("query", "").removeprefix("search: ")
-            return {"results": [t for t in self.tasks if искомое in t["content"]]}
+            raise AssertionError(
+                "backstage снова ищет поиском — он врёт на свежих задачах")
         raise AssertionError(f"неожиданный GET {path}")
 
     async def post(self, path, json=None):
@@ -102,3 +107,41 @@ def test_недоступный_todoist_не_роняет_ночной_прог�
 def test_неизвестный_источник_это_ошибка_программиста(todoist):
     with pytest.raises(KeyError):
         asyncio.run(backstage.raise_task("токен", "выдумка", "текст"))
+
+
+def test_задача_ищется_перебором_а_не_поиском():
+    """Todoist не находит `search:` только что созданную задачу.
+
+    Прогон 02.08.2026: две задачи заведены подряд, поиск не нашёл ни одной,
+    перебор нашёл обе. То есть правило «одна задача на копилку, а не на
+    находку» молча ломалось ровно в том окне, когда две находки приходят
+    подряд, — а именно так они и приходят.
+    """
+    спрошено = []
+
+    class Клиент:
+        async def get(self, путь, params=None):
+            спрошено.append((путь, params))
+            return {"results": [{"id": "1", "content": "Недельный обзор"}]}
+
+    найдено = asyncio.run(backstage._open_task(Клиент(), "Недельный обзор"))
+    assert найдено and найдено["id"] == "1"
+    пути = [п for п, _ in спрошено]
+    assert "/tasks" in пути
+    assert "/tasks/filter" not in пути, "снова ищем поиском — он врёт на свежих задачах"
+
+
+def test_чужая_задача_с_похожим_названием_не_считается():
+    class Клиент:
+        async def get(self, путь, params=None):
+            return {"results": [{"id": "1", "content": "Недельный обзор с Таней"}]}
+
+    assert asyncio.run(backstage._open_task(Клиент(), "Недельный обзор")) is None
+
+
+def test_у_каждого_обзора_свой_повод():
+    """Три отдельных повода, а не один список: у каждого свой разговор."""
+    for ключ in ("недельный обзор", "месячный итог", "годовая стратсессия"):
+        находка = backstage.FINDINGS[ключ]
+        assert находка.title and находка.why
+        assert "режим" in находка.why, f"«{ключ}» не говорит, куда переключаться"
