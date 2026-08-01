@@ -1,10 +1,10 @@
-# coach-bot — телеграм-коуч Василия
+# gtd-coach-bot — телеграм-коуч
 
 Второй канал того же коуча, что живёт в Claude Code. Голос — основной вход:
 наговорил → расшифровалось → коуч понял, разложил дела по Todoist и записал
 значимое в общую память.
 
-Бот: [@vefmv_gtd_bot](https://t.me/vefmv_gtd_bot) · хостинг: Bronto, контейнер `coach-bot`.
+Бот: [@vefmv_gtd_bot](https://t.me/vefmv_gtd_bot) · хостинг: Bronto, контейнер `gtd-coach-bot`.
 
 ## Из чего состоит
 
@@ -77,8 +77,8 @@ OpenAI». Если не вышло совсем — сообщение с чис
 ## Развернуть
 
 ```bash
-git clone git@github.com:vefmvai/gtd-coach-bot.git /opt/apps/coach-bot
-cd /opt/apps/coach-bot
+git clone git@github.com:vefmvai/gtd-coach-bot.git /opt/apps/gtd-coach-bot
+cd /opt/apps/gtd-coach-bot
 cp .env.example .env && vim .env          # токены
 git clone git@github.com:vefmvai/gtd-coach-brain.git data/brain
 docker compose up -d --build
@@ -106,7 +106,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 ## Обслуживание
 
 Код правится **только на ноутбуке** и приезжает на сервер через GitHub:
-ноутбук → `git push` → на сервере `git pull`. Клон `/opt/apps/coach-bot` —
+ноутбук → `git push` → на сервере `git pull`. Клон `/opt/apps/gtd-coach-bot` —
 цель выкатки, а не источник правды: его deploy-ключ read-only, а хук `pre-commit`
 там отклоняет коммиты. Так на сервере физически не может завестись версия кода,
 которой нет больше нигде.
@@ -129,7 +129,7 @@ git pull && /opt/infra/scripts/host/with-build-lock.sh docker compose up -d --bu
 Telegram. Посмотреть причину:
 
 ```bash
-docker inspect --format '{{json .State.Health}}' coach-bot | python3 -m json.tool
+docker inspect --format '{{json .State.Health}}' gtd-coach-bot | python3 -m json.tool
 ```
 
 Команды в чате: `/start` — проверка связи, `/new` — начать разговор с чистого
