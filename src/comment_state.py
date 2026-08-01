@@ -181,6 +181,18 @@ class Журнал:
             ).fetchone()
         return row[0] if row else None
 
+    def было_ли_что_откатывать(self) -> bool:
+        """Были ли вообще действия по комментариям — хоть когда-нибудь.
+
+        Нужна ровно для одной фразы: «я ничего не менял» и «всё уже откачено» —
+        разные ответы, и путать их значит врать человеку про свою же работу.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM comment_actions WHERE kind<>'обращение' LIMIT 1"
+            ).fetchone()
+        return row is not None
+
     def действия(self, request_id: str) -> list[Действие]:
         """Живые действия обращения, свежие первыми — откатывать надо с конца."""
         with self._connect() as db:
