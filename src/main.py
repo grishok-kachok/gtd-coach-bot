@@ -8,11 +8,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from telegram import Update
+from telegram import ReplyKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
@@ -27,13 +28,16 @@ from .archive import Archive
 from .backstage import raise_task
 from .brain import Brain
 from .comments import Канал, build_undo_server
+from .context_cost import ContextCost
 from . import detectors
 from .digest import Digester
 from .engine import CoachEngine
 from .memory_watch import MemoryWatch
+from . import modes as режимы_модуль
 from . import profile
 from .promise import PromiseWatch
 from .prompts import followups, load as load_prompt, missing as missing_prompts
+from .recall import build_recall_server
 from .retry import retry_network
 from .rhythms import describe, path_in, read
 from . import settings as coach_settings
@@ -70,6 +74,18 @@ PHOTOS_DIR = Path(os.environ.get("PHOTOS_DIR", "/tmp/coach-photos"))
 # прочая экзотика) не притворяемся, что видим, — честно говорим владельцу.
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
+# Клавиатура — не новая дверь, а печатающая за человека рука. Каждая кнопка
+# отправляет в чат ровно ту фразу, которую можно сказать голосом; выключишь
+# клавиатуру — всё продолжит работать словами. Поэтому и reply, а не inline:
+# inline-кнопка шлёт скрытый код, которого в разговоре не видно, и тогда
+# кнопка становится второй дверью со своей логикой.
+КЛАВИАТУРА = ReplyKeyboardMarkup(
+    [["Что сегодня?", "Что по плану на неделю?"],
+     ["Проведём недельный обзор", "Покажи дашборд"],
+     ["Переключись в полный режим", "Вернись в рабочий режим"]],
+    resize_keyboard=True,
+)
+
 def env(name: str, default: str | None = None, required: bool = False) -> str:
     value = os.environ.get(name, default or "")
     if required and not value:
@@ -88,6 +104,12 @@ class CoachBot:
         # Заполняется в run(): через это приложение уходят файлы и жалобы канала.
         self.app: Application | None = None
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
+        # Состав режимов приезжает из плагина. Сломан или отсутствует — падаем
+        # здесь, одной понятной строкой: без состава неизвестно, что класть
+        # коучу в голову, а зашитый в питон запасной был бы вторым домом.
+        self.modes = режимы_модуль.load()
+        # Цена контекста в токенах — факт от модели, а не пересчёт байтов.
+        self.cost = ContextCost(Path(env("ARCHIVE_DB", "/archive/coach.db")))
         # Вторая дверь к коучу — комментарии в карточках задач. Заводится до
         # движка: движку нужна её кнопка отката.
         self.comments = Канал(
@@ -96,11 +118,15 @@ class CoachBot:
             archive=self.archive,
             model=env("COACH_MODEL", "claude-fable-5"),
             сказать=self._сказать_владельцу,
+            mode=self.modes[режимы_модуль.ФОНОВЫЙ],
+            cost=self.cost,
         )
         self.engine = CoachEngine(
             brain_dir=self.brain_dir,
             session_storage=SessionStorage(state_dir / "session_id"),
-            system_prompt=self._system_prompt(),
+            modes=self.modes,
+            cost=self.cost,
+            recall=build_recall_server(Path(env("ARCHIVE_DB", "/archive/coach.db"))),
             todoist_token=self.todoist_token,
             model=env("COACH_MODEL", "claude-fable-5"),
             effort=env("COACH_EFFORT", "medium"),
@@ -127,9 +153,15 @@ class CoachBot:
         if beefs:
             log.error("настройки в мозге сломаны, беру умолчания: %s", "; ".join(beefs))
         night_model = str(values["модель_ночной_работы"])
-        self.digester = Digester(self.brain_dir, self.archive, model=night_model)
-        self.tidier = HistoryTidier(self.brain_dir, model=night_model)
-        self.memory_watch = MemoryWatch(self.brain_dir, model=night_model)
+        # Вся фоновая работа идёт в фоновом режиме, и ставит его код: человек
+        # ночную выжимку не заказывает и её головой не пользуется.
+        фон = self.modes[режимы_модуль.ФОНОВЫЙ]
+        self.digester = Digester(self.brain_dir, self.archive, model=night_model,
+                                 mode=фон, cost=self.cost)
+        self.tidier = HistoryTidier(self.brain_dir, model=night_model,
+                                    mode=фон, cost=self.cost)
+        self.memory_watch = MemoryWatch(self.brain_dir, model=night_model,
+                                        mode=фон, cost=self.cost)
         # Несгораемая история дел: Todoist на Free помнит ~неделю, снимок помнит всё.
         self.snapshot = TodoistSnapshot(
             Path(env("ARCHIVE_DB", "/archive/coach.db")), self.todoist_token
@@ -177,20 +209,6 @@ class CoachBot:
         if openai is None:
             log.warning("OPENAI_API_KEY не задан: у расшифровки нет запасного сервиса")
         return VoiceRecognizer(primary=primary, fallback=openai, proxy=proxy)
-
-    def _system_prompt(self) -> str:
-        # Конституция живёт в плагине gtd-coach и приезжает смонтированным
-        # клоном, а не копией в образе. Отсюда новый способ сломаться: если
-        # клона на сервере нет, docker молча подставит пустую папку — бот
-        # стартует и упадёт на чтении. Падать надо вслух и по адресу, иначе
-        # причину искать полчаса.
-        path = Path(env("PROMPT_FILE", "/plugin/prompts/coach.md"))
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"конституция коуча не найдена: {path}. Проверь, что клон плагина "
-                f"есть на сервере и смонтирован (том /plugin в docker-compose.yml)"
-            )
-        return path.read_text(encoding="utf-8")
 
     @staticmethod
     def _calendar_config() -> dict | None:
@@ -242,15 +260,22 @@ class CoachBot:
                 "vasiliy", channel, archived_as or text, self.engine.sessions.load()
             )
             typing = asyncio.create_task(self._keep_typing(chat_id, context))
+            mode = self.engine.режим()
             try:
                 await self.brain.pull()
-                # Выжимки прошлых дней движок подставит сам, если разговор начинается заново.
-                memory = await asyncio.to_thread(self.archive.recent_digests)
+                # Рюкзак собирается ПОД РЕЖИМ. Выжимки движок подставит сам, если
+                # разговор начинается заново; сколько их — решает режим.
+                mode = self.engine.режим()
+                memory = await asyncio.to_thread(self.archive.recent_digests, mode.окно)
+                # Стратегия и профиль едут тем же заходом. Раньше это была просьба
+                # в конституции «читай в начале разговора» — по десяти последним
+                # сессиям она сработала в одной.
+                strategy = await asyncio.to_thread(self.engine.файлы_стратегии, mode)
                 # Сводку дел — к каждой реплике: коуч обязан знать картину дня всегда,
                 # а не когда вспомнит сходить в Todoist.
                 summary = await agenda.summary(self.todoist_token)
-                await self._check_load(memory, summary, text)
-                answer = await self.engine.ask(text, memory, summary)
+                answer = await self.engine.ask(text, memory, summary, strategy, channel)
+                await self._check_load(mode, channel, summary, text)
                 await self.brain.push(text[:60].replace("\n", " "))
             except Exception as error:  # доставляем боль владельцу, а не в лог-файл
                 log.exception("сорвалось на ответе")
@@ -262,9 +287,40 @@ class CoachBot:
         # Коуч мог только что поменять ритмы по просьбе Василия — заметить это надо
         # сразу, а не через час: «пиши мне три раза в день» должно работать как фраза.
         await self._reread_rhythms(context, loud=True)
+        # И режим тоже: «переключись в полный» — такая же фраза, как «пиши три
+        # раза в день». Разговор при этом закроется и откроется заново — это
+        # делает сам движок перед следующей репликой.
+        await self._заметить_режим(context, mode)
 
-        for chunk in self._split(answer):
-            await context.bot.send_message(chat_id=chat_id, text=chunk)
+        куски = self._split(answer)
+        for номер, chunk in enumerate(куски, 1):
+            # Значок режима — в самом конце последнего куска. Один символ,
+            # читать не мешает, всегда на виду. Заголовок «Режим: рабочий»
+            # перед каждым ответом надоел бы на третий день.
+            хвост = f"\n\n{self.engine.режим().значок}" if номер == len(куски) else ""
+            await context.bot.send_message(
+                chat_id=chat_id, text=chunk + хвост, reply_markup=КЛАВИАТУРА,
+            )
+
+    async def _заметить_режим(self, context: ContextTypes.DEFAULT_TYPE, было) -> None:
+        """Сказать вслух, если режим переключился.
+
+        Переключает его сам коуч, правя `настройки.md` по просьбе Василия, —
+        то есть машинная правка, и по правилу проекта она обязана быть видимой.
+        Молча сменившийся режим означал бы, что человек не знает, с какой
+        головой он сейчас разговаривает.
+        """
+        стало = self.engine.режим()
+        if стало.имя == было.имя:
+            return
+        log.info("режим переключён: %s → %s", было.имя, стало.имя)
+        await context.bot.send_message(
+            chat_id=self.owner_id,
+            text=(f"{стало.значок} Переключил режим: {было.имя} → {стало.имя} "
+                  f"({стало.повод}).\nСледующая реплика начнёт новый разговор — "
+                  f"память подкладывается только в его начало."),
+            reply_markup=КЛАВИАТУРА,
+        )
 
     async def _send_document(self, path: Path, caption: str = "") -> bool:
         """Отправить файл владельцу. Возвращает, дошёл ли.
@@ -520,10 +576,14 @@ class CoachBot:
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._mine(update):
             return
+        режим = self.engine.режим()
         await update.message.reply_text(
             "Я на связи. Наговаривай или пиши — разберём дела.\n"
             "Пингую утром в 10:00, днём в 14:30 и вечером в 20:00.\n"
-            "/new — начать разговор с чистого листа."
+            f"Сейчас режим {режим.значок} {режим.имя} — {режим.повод}.\n"
+            "Кнопки внизу просто печатают за тебя: то же самое можно сказать голосом.\n"
+            "/new — начать разговор с чистого листа.",
+            reply_markup=КЛАВИАТУРА,
         )
 
     async def on_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -541,15 +601,15 @@ class CoachBot:
         # значит правка текста в плагине доезжает перезапуском, а не пересборкой.
         name, channel = context.job.data
         now = datetime.now(MOSCOW)
-        # Первого числа утренний чек-ин уступает место стратсессии: месяц
-        # закрылся ночью, и разговор в этот день начинается с итога, а не
-        # с обещания дня. Двух сообщений подряд не шлём — это один разговор.
-        if name == "чекин-утро" and now.day == 1:
-            # Подводим ЗАКРЫВШИЙСЯ месяц, а не начавшийся: первого августа
-            # итог пишется за июль. Отсюда шаг на день назад.
-            closed = (now.date() - timedelta(days=1)).strftime("%Y-%m")
-            prompt = load_prompt("месячный-итог").format(month=closed)
-            channel = "monthly"
+        # Утро понедельника и первое число — поводы для обзора. Раньше первого
+        # числа код сам ЗАПУСКАЛ месячный итог; теперь коуч его ПРЕДЛАГАЕТ.
+        # Разница не в вежливости: стратсессия по звонку не случается, а вот
+        # переключение режима без согласия человека — случается, и он получает
+        # дорогую голову там, где просил «что сегодня».
+        повод = self._повод_обзора(now)
+        if name == "чекин-утро" and повод:
+            prompt = load_prompt("предложение-обзора").format(**повод)
+            channel = повод["канал"]
         else:
             prompt = load_prompt(name).text
             if name == "чекин-утро":
@@ -561,6 +621,29 @@ class CoachBot:
         sent_at = now.isoformat(timespec="seconds")
         await self._think_and_reply(prompt, self.owner_id, context, channel=channel)
         self._schedule_followup(context, sent_at, attempt=1)
+
+    @staticmethod
+    def _повод_обзора(now) -> dict | None:
+        """Есть ли сегодня повод предложить обзор, и какой.
+
+        Порядок проверки от крупного к мелкому: первое января — это ещё
+        и первое число, и, случись оно понедельником, три повода разом.
+        Предлагаем **один**, самый крупный: три предложения подряд читаются
+        как три задачи, хотя это один разговор.
+        """
+        if now.month == 1 and now.day == 1:
+            return {"повод": f"{now.year - 1} год", "что": "годовую стратсессию",
+                    "режим": "годовой", "навык": "месячный-итог", "канал": "yearly"}
+        if now.day == 1:
+            # Подводим ЗАКРЫВШИЙСЯ месяц, а не начавшийся: первого августа
+            # итог пишется за июль. Отсюда шаг на день назад.
+            закрылся = (now.date() - timedelta(days=1)).strftime("%Y-%m")
+            return {"повод": f"месяц {закрылся}", "что": "месячный итог",
+                    "режим": "полный", "навык": "месячный-итог", "канал": "monthly"}
+        if now.weekday() == 0:
+            return {"повод": "неделя", "что": "недельный обзор",
+                    "режим": "полный", "навык": "недельный-обзор", "канал": "weekly"}
+        return None
 
     async def _обход(self) -> detectors.Свод:
         """Обход завалов. Упал — пустой свод и жалоба в лог: чек-ин важнее."""
@@ -705,6 +788,17 @@ class CoachBot:
                 # Журнал держим в том же окне, что читает коуч, — вместе с адресами.
                 self.digester.rotate()
 
+                # Обзоры. Агент стратсессию сам не запускает — но задача с датой
+                # ставится сама, потому что предложение в чате уползает вверх
+                # за полдня. Ровно правило «фоновая работа ставит задачу с датой».
+                await self._поставить_обзоры(today)
+
+                # Оглавление памяти. Валидатор ловит сироту и битую ссылку, но
+                # срабатывает при записи; запись могла пройти мимо хука. Раз
+                # в сутки проверяем ещё раз — расхождение обязано находиться
+                # не тогда, когда о него споткнутся.
+                await self._проверить_оглавление()
+
                 if not await self.brain.push(f"выжимка за {yesterday.isoformat()}"):
                     # push вернул False и когда менять было нечего, и когда он упал.
                     # Различаем по логу; задачу поднимаем только если правки были.
@@ -722,39 +816,115 @@ class CoachBot:
                 log.exception("ночная выжимка сорвалась")
 
 
-    async def _check_load(self, memory: str, summary: str, prompt: str = "") -> None:
-        """Сверить то, что реально кладём в контекст, с паспортом памяти.
+    async def _поставить_обзоры(self, today) -> None:
+        """Задачи на обзоры — понедельник, первое число, первое января.
 
-        Считаем только когда память подставляется — то есть в первый запрос новой
-        сессии. В середине разговора выжимки не грузятся, и «сумма» была бы
-        не той величиной, о которой говорит паспорт.
+        Три отдельных повода, а не один список: у каждого своя дата и свой
+        разговор. Вторая задача не заводится — `raise_task` допишет комментарий
+        к уже стоящей, это его штатное поведение.
         """
-        if not memory or self.engine.sessions.load():
+        поводы = []
+        if today.weekday() == 0:
+            поводы.append(("недельный обзор", f"Неделя началась {today.isoformat()}."))
+        if today.day == 1:
+            закрывшийся = (today - timedelta(days=1)).strftime("%Y-%m")
+            поводы.append(("месячный итог", f"Закрылся {закрывшийся}."))
+        if today.month == 1 and today.day == 1:
+            поводы.append(("годовая стратсессия", f"Закрылся {today.year - 1} год."))
+        for повод, заметка in поводы:
+            исход = await raise_task(self.todoist_token, повод, заметка)
+            log.info("задача на «%s»: %s", повод, исход or "не доехала до Todoist")
+
+    async def _проверить_оглавление(self) -> None:
+        """Сверить точку входа в память с тем, что лежит на диске.
+
+        Две беды, и они зеркальные: **сирота** — файл есть, а ссылки на него
+        нет ниоткуда (найдёт его только тот, кто уже знает адрес); **битая
+        ссылка** — ссылка есть, а файла нет. Валидатор ловит обе, но при записи,
+        а запись могла пройти мимо хука — например, файл положил не коуч,
+        а `git pull` с другой машины.
+
+        Выжимки из проверки исключены: их список собирает тот же ночной прогон
+        между метками в оглавлении, и ругаться на них здесь значило бы ругаться
+        на самого себя посреди работы.
+        """
+        память = self.brain_dir / "память"
+        индекс = память / "00-index.md"
+        try:
+            текст = индекс.read_text(encoding="utf-8")
+        except OSError as err:
+            log.error("оглавление памяти не читается: %s", err)
             return
-        beef = check_budget(self.brain_dir, {
-            "конституция коуча (роль, тон, что делать с делами)": len(
-                self.engine.system_prompt.encode("utf-8")
-            ),
-            "окно выжимок — 15 кусков всегда (7 дней + 5 недель + 3 месяца)": len(
-                memory.encode("utf-8")
-            ),
-            "сводка дел — агрегат Todoist к каждой реплике": len(summary.encode("utf-8")),
-            # Описания кнопок кладёт в контекст движок, а не наш код, — и ровно
-            # поэтому они годами не попадали в паспорт. Считает тот, кто грузит;
-            # здесь мы просто спрашиваем у движка, во что обошёлся его набор.
-            "описания кнопок инструментов": await self.engine.tools_weight(),
-            # Свод завалов уезжает в контекст один раз в сутки — с утренним
-            # чек-ином. Считаем его только тогда, когда он там правда есть:
-            # в остальные разы это ноль, а не «забыли посчитать».
-            "ночной обход дел — свод к утреннему чек-ину": (
-                len(prompt.encode("utf-8")) - len(prompt.split(detectors.ЗАГОЛОВОК)[0].encode("utf-8"))
-                if detectors.ЗАГОЛОВОК in prompt else 0
-            ),
-        })
+
+        связанные = set(re.findall(r"\[\[([^\]|#]+)", текст))
+        файлы = {
+            путь.stem: путь
+            for путь in память.rglob("*.md")
+            if путь.name != "00-index.md" and "выжимки" not in путь.parts
+        }
+        сироты = sorted(имя for имя in файлы if имя not in связанные)
+        битые = sorted(имя for имя in связанные if имя not in файлы)
+        if not сироты and not битые:
+            log.info("оглавление памяти сходится: %d заметок", len(файлы))
+            return
+        беда = []
+        if сироты:
+            беда.append("сироты (файл есть, ссылки нет): " + ", ".join(сироты))
+        if битые:
+            беда.append("битые ссылки (ссылка есть, файла нет): " + ", ".join(битые))
+        строка = "; ".join(беда)
+        log.warning("оглавление памяти разошлось: %s", строка)
+        await raise_task(self.todoist_token, "оглавление", строка)
+
+    async def _check_load(self, mode, channel: str, summary: str = "", prompt: str = "") -> None:
+        """Сверить то, что реально уехало в контекст, с паспортом памяти.
+
+        Сверяем только ПЕРВЫЙ ход сессии: в середине разговора выжимки уже не
+        грузятся, а контекст растёт от самих реплик — померили бы болтовню,
+        а не рюкзак. Признак первого хода даёт сам движок, а не догадка по
+        закладке: к моменту сверки закладка уже перезаписана свежей сессией.
+
+        Двумя сторожами сразу, и это не дубль. Токены отвечают на вопрос
+        «во что обошёлся этот режим» и берутся у самой модели. Байты по строкам
+        отвечают на другой — «не врёт ли паспорт про отдельную строку»; именно
+        так поймали «объявлено 69 400, на деле 37 962». Токенов по строкам
+        модель не разбивает, и заменить одно другим нельзя.
+        """
+        if not self.engine.последний_первый:
+            return
+        beef = check_budget(
+            self.brain_dir,
+            {
+                "конституция коуча — части под режим": len(
+                    режимы_модуль.конституция(mode.части).encode("utf-8")
+                ),
+                "окно выжимок — куски по режиму (дни + недели + месяцы)": len(
+                    self.archive.recent_digests(mode.окно).encode("utf-8")
+                ),
+                "файлы стратегии — подкладывает код в первый запрос": len(
+                    self.engine.файлы_стратегии(mode).encode("utf-8")
+                ),
+                # Описания кнопок кладёт в контекст движок, а не наш код.
+                # Держим строку ради видимости: она объявляет полезную нагрузку,
+                # а не цену — цена целиком в токенах ниже.
+                "описания кнопок инструментов": await self.engine.tools_weight(),
+                "сводка дел — агрегат Todoist к каждой реплике": len(summary.encode("utf-8")),
+                # Свод завалов уезжает в контекст один раз в сутки — с утренним
+                # чек-ином. Считаем его только тогда, когда он там правда есть:
+                # в остальные разы это ноль, а не «забыли посчитать».
+                "ночной обход дел — свод к утреннему чек-ину": (
+                    len(prompt.encode("utf-8"))
+                    - len(prompt.split(detectors.ЗАГОЛОВОК)[0].encode("utf-8"))
+                    if detectors.ЗАГОЛОВОК in prompt else 0
+                ),
+            },
+            mode=mode.имя,
+            tokens=self.engine.последний_контекст,
+        )
         if beef:
             log.warning("стартовая загрузка разошлась с паспортом: %s", beef)
             # Сигнализация без реакции — декорация. Лампочка горит → задача с датой.
-            await raise_task(self.todoist_token, "потолок", beef)
+            await raise_task(self.todoist_token, "потолок", f"[{mode.имя}, {channel}] {beef}")
 
     # --- ритмы ---
 
@@ -841,6 +1011,15 @@ class CoachBot:
             raise SystemExit(
                 "В плагине нет промптов: " + ", ".join(gone) +
                 ". Проверь, что клон плагина на сервере свежий и том /plugin смонтирован."
+            )
+        # Части конституции — та же история и та же цена ошибки. Молча
+        # упростившийся коуч хуже отсутствующего: он продолжит отвечать,
+        # просто перестанет быть собой, и понять это будет неоткуда.
+        нет_частей = режимы_модуль.недостающие_части()
+        if нет_частей:
+            raise SystemExit(
+                "В плагине нет частей конституции: " + ", ".join(нет_частей) +
+                f" (папка {режимы_модуль.PARTS_DIR}). Коуч без них — не коуч."
             )
         application = Application.builder().token(env("TELEGRAM_BOT_TOKEN", required=True)).build()
         self.app = application  # через него инструмент дашборда шлёт файл

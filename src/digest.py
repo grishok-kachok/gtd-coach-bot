@@ -15,16 +15,11 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    get_session_messages,
-    query,
-)
+from claude_agent_sdk import get_session_messages
 
 from .archive import WINDOW, Archive
+from .backrun import прогон
+from .modes import Режим
 from .prompts import load as load_prompt
 
 log = logging.getLogger(__name__)
@@ -80,28 +75,23 @@ class DigestPaths:
 
 
 class Digester:
-    def __init__(self, brain_dir: Path, archive: Archive, model: str = "claude-fable-5") -> None:
+    def __init__(self, brain_dir: Path, archive: Archive, model: str = "claude-fable-5",
+                 mode: Режим | None = None, cost=None) -> None:
         self.brain_dir = brain_dir
         self.archive = archive
         self.model = model
+        # Фоновый режим: ни встроенных инструментов, ни правил памяти.
+        # Выжимка думает над текстом, по файлам не лазит и в знания не пишет.
+        self.mode = mode
+        self.cost = cost
         self.paths = DigestPaths.under(brain_dir)
 
     async def _summarize(self, prompt: str, system: str) -> str:
-        options = ClaudeAgentOptions(
-            model=self.model,
+        return await прогон(
+            mode=self.mode, prompt=prompt, system=system, model=self.model,
             effort="high",  # выжимка делается раз в сутки — экономить тут нечего
-            tools=[],       # думать, а не лазить по файлам
-            system_prompt=system,
+            cost=self.cost, channel="ночная выжимка", что="выжимка",
         )
-        parts: list[str] = []
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        parts.append(block.text)
-            elif isinstance(message, ResultMessage) and message.is_error:
-                log.error("выжимка не удалась: %s", message.result)
-        return "\n".join(p.strip() for p in parts if p.strip()).strip()
 
     # --- день ---
 

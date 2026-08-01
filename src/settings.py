@@ -26,6 +26,8 @@ from pathlib import Path
 
 import yaml
 
+from .modes import ПО_УМОЛЧАНИЮ as РЕЖИМ_ПО_УМОЛЧАНИЮ, РАЗГОВОРНЫЕ
+
 log = logging.getLogger(__name__)
 
 SETTINGS_FILE = "настройки.md"
@@ -43,6 +45,7 @@ KNOWN_MODELS = (
 DEFAULTS: dict[str, object] = {
     "модель_разговора": "claude-fable-5",
     "модель_ночной_работы": "claude-fable-5",
+    "режим": РЕЖИМ_ПО_УМОЛЧАНИЮ,
     "кнопки_todoist": {},
     "кнопки_календаря": {},
 }
@@ -83,6 +86,14 @@ def _complaints(data: dict) -> list[str]:
                 f"«{key}: {value}» — код не знает такой модели. Доступны: "
                 + ", ".join(KNOWN_MODELS)
             )
+
+    if "режим" in data and data["режим"] not in РАЗГОВОРНЫЕ:
+        # Молча проглоченная опечатка означала бы, что человек попросил полный
+        # режим, а коуч продолжил жить в рабочем и об этом не сказал.
+        problems.append(
+            f"«режим: {data['режим']}» — такого режима разговора нет. Доступны: "
+            + ", ".join(РАЗГОВОРНЫЕ)
+        )
 
     todoist_names, calendar_names = known_button_names()
     for key, known in (("кнопки_todoist", todoist_names), ("кнопки_календаря", calendar_names)):
@@ -173,6 +184,7 @@ YAML: имя модели из известного списка, тумблер
 ```yaml
 модель_разговора: "{talk}"
 модель_ночной_работы: "{night}"
+режим: "{mode}"
 кнопки_todoist: {{}}
 кнопки_календаря: {{}}
 ```
@@ -181,6 +193,13 @@ YAML: имя модели из известного списка, тумблер
 - **модель_ночной_работы** — кем он ночью сворачивает день и проверяет память.
   Ночью торопиться некуда, а объём большой, поэтому модель тут может быть
   другой, чем в разговоре.
+- **режим** — сколько коуч берёт с собой в разговор. Доступны: {modes_list}.
+  `рабочий` — обычный день. `полный` — недельный обзор и месячный итог,
+  туда приезжают миссия, ценности и профиль. `годовой` — раз в год, там же
+  двенадцать месяцев памяти вместо трёх. Состав каждого — файл `режимы.md`
+  в плагине. Смена режима **закрывает текущий разговор и открывает новый**:
+  память подкладывается только в первый запрос сессии, и по-другому
+  переключение не значило бы ничего.
 - **кнопки_todoist / кнопки_календаря** — что не грузить в сессию.
   Пустой список `{{}}` значит «грузить всё». Выключенная кнопка не просто
   не работает — она не занимает места в контексте, а место здесь и есть
@@ -211,10 +230,14 @@ def ensure(brain_dir: Path, today: str) -> bool:
         path.write_text(
             TEMPLATE.format(today=today, talk=DEFAULTS["модель_разговора"],
                             night=DEFAULTS["модель_ночной_работы"],
-                            models=", ".join(f"`{m}`" for m in KNOWN_MODELS)),
+                            mode=DEFAULTS["режим"],
+                            models=", ".join(f"`{m}`" for m in KNOWN_MODELS),
+                            modes_list=", ".join(f"`{m}`" for m in РАЗГОВОРНЫЕ)),
             encoding="utf-8",
         )
         created = True
+    else:
+        created = _дописать_режим(path) or created
 
     index = brain_dir / "память" / "00-index.md"
     try:
@@ -234,6 +257,33 @@ def ensure(brain_dir: Path, today: str) -> bool:
     return True
 
 
+def _дописать_режим(path: Path) -> bool:
+    """Дотянуть уже заведённый файл до нынешней схемы: строка «режим».
+
+    Файл читает код — значит и держать его полным работа кода. Без этой
+    строки режим существовал бы только в питоне: человек открыл бы настройки
+    и не узнал, что переключаться вообще можно. Правка добавляющая, чужого
+    не трогает.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    block = YAML_BLOCK.search(text)
+    if not block or re.search(r"^\s*режим\s*:", block.group(1), re.MULTILINE):
+        return False
+    строка = (f'режим: "{DEFAULTS["режим"]}"   # {" | ".join(РАЗГОВОРНЫЕ)}'
+              f' — состав в режимы.md плагина\n')
+    # Ставим сразу за моделями: соседняя настройка того же рода — её меняют
+    # словами в разговоре, а читает код.
+    вставка = block.start(1) + len(block.group(1))
+    хвост = block.group(1).rstrip("\n")
+    новый = f"{хвост}\n{строка.rstrip()}"
+    path.write_text(text[:block.start(1)] + новый + text[вставка:], encoding="utf-8")
+    log.info("в настройки дописана строка «режим»: %s", path)
+    return True
+
+
 def describe(settings: dict, previous: dict | None = None) -> str:
     """Человеческая строка про настройки — её коуч показывает человеку."""
     def buttons(value: dict) -> str:
@@ -243,10 +293,11 @@ def describe(settings: dict, previous: dict | None = None) -> str:
     if previous is None:
         return (f"разговор — {settings['модель_разговора']}, "
                 f"ночная работа — {settings['модель_ночной_работы']}, "
+                f"режим — {settings['режим']}, "
                 f"кнопки Todoist: {buttons(settings['кнопки_todoist'])}, "
                 f"кнопки Календаря: {buttons(settings['кнопки_календаря'])}")
     changed = []
-    for key in ("модель_разговора", "модель_ночной_работы"):
+    for key in ("модель_разговора", "модель_ночной_работы", "режим"):
         if settings[key] != previous[key]:
             changed.append(f"{key.replace('_', ' ')}: {previous[key]} → {settings[key]}")
     for key in ("кнопки_todoist", "кнопки_календаря"):

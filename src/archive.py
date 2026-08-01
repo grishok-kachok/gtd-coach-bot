@@ -175,17 +175,24 @@ class Archive:
             ).fetchall()
         return [(row[0], row[1]) for row in rows]
 
-    def window_rows(self) -> list[tuple[str, str, str]]:
+    def window_rows(self, window: dict[str, int] | None = None) -> list[tuple[str, str, str]]:
         """Куски окна памяти по порядку: (уровень, ключ, текст).
 
         Каждый уровень отбирается СВОИМ запросом. Одним запросом нельзя: ключи
         уровней разного формата (`2026-08`, `2026-W31`, `2026-08-03`), и при
         сортировке текстом недели вытесняли бы месяцы из общей выборки — так этот
         код и был сломан до 31.07.2026.
+
+        `window` задаёт режим контекста: фоновому прогону память не нужна вовсе,
+        годовой стратсессии нужно двенадцать месяцев вместо трёх. Не передали —
+        берём рабочее окно, то самое постоянное 7 + 5 + 3.
         """
+        window = WINDOW if window is None else window
         rows: list[tuple[str, str, str]] = []
         with self._connect() as db:
-            for period, limit in WINDOW.items():
+            for period, limit in window.items():
+                if not limit:
+                    continue
                 picked = db.execute(
                     "SELECT period_key, text FROM digests WHERE period=? "
                     "ORDER BY period_key DESC LIMIT ?",
@@ -194,13 +201,13 @@ class Archive:
                 rows.extend((period, key, text) for key, text in reversed(picked))
         return rows
 
-    def recent_digests(self) -> str:
-        """Память для начала нового разговора — окно WINDOW, склеенное в текст.
+    def recent_digests(self, window: dict[str, int] | None = None) -> str:
+        """Память для начала нового разговора — окно, склеенное в текст.
 
         Этот текст подставляется в первый запрос новой сессии, но НЕ пишется в
         архив как сообщение — иначе завтрашний транскрипт вобрал бы вчерашние
         выжимки, и они бы разрастались от пересказа к пересказу.
         """
         return "\n\n".join(
-            f"{LABELS[period]} {key}:\n{text}" for period, key, text in self.window_rows()
+            f"{LABELS[period]} {key}:\n{text}" for period, key, text in self.window_rows(window)
         )

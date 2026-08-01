@@ -13,7 +13,10 @@ services:
       - BRAIN_DIR=/brain
       - STATE_DIR=/state
       - ARCHIVE_DB=/archive/coach.db
-      - PROMPT_FILE=/plugin/prompts/coach.md
+      # Конституция с этапа 17 не один файл, а четыре части: код склеивает
+      # нужные под режим контекста. Состав режимов — там же, в плагине.
+      - CONSTITUTION_DIR=/plugin/prompts/конституция
+      - MODES_FILE=/plugin/режимы.md
       # Остальные тексты поведения (чек-ины, дожимы, выжимки, ночная проверка,
       # подпись коммита, месячный итог) — там же, рядом с конституцией.
       - PROMPTS_DIR=/plugin/prompts

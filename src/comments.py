@@ -49,19 +49,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    create_sdk_mcp_server,
-    query,
-    tool,
-)
+from claude_agent_sdk import create_sdk_mcp_server, tool
 from todoist_mcp import plan as plan_module
 from todoist_mcp import tools as manifest
 from todoist_mcp.client import TodoistClient, TodoistError
 
+from .backrun import прогон
 from .comment_state import МАРКЕР, Действие, Журнал
 from .prompts import load as load_prompt
 from .retry import GaveUp, retry_network
@@ -184,11 +177,17 @@ class Канал:
         archive=None,
         model: str = "claude-fable-5",
         сказать=None,
+        mode=None,
+        cost=None,
     ) -> None:
         self.token = token
         self.журнал = Журнал(db_path)
         self.archive = archive
         self.model = model
+        # Режим работника — фоновый, и ставит его код: комментарий это записка
+        # возле дела, там нужна методика, а не биография человека.
+        self.mode = mode
+        self.cost = cost
         # Чем жаловаться владельцу в телеграм, когда канал упёрся в потолок.
         self.сказать = сказать
         self._хозяин: str | None = None
@@ -431,27 +430,22 @@ class Канал:
         )
         if self._набор is None:
             self._набор = рабочий_набор(self.token)
-        options = ClaudeAgentOptions(
-            model=self.model,
-            effort="medium",
-            system_prompt=промпт.system,
-            mcp_servers={"todoist": self._набор},
-            allowed_tools=["mcp__todoist"],
-            permission_mode="bypassPermissions",
-        )
-        куски: list[str] = []
+        # Фоновый режим. Работник был единственным из четырёх фоновых прогонов,
+        # кто тащил встроенные инструменты — 3 781 токен на каждое обращение
+        # при том, что лазить по файлам ему нечем и незачем: кнопки Todoist
+        # у него свои, а карточка и методичка уже в промпте.
         try:
-            async for сообщение in query(prompt=текст, options=options):
-                if isinstance(сообщение, AssistantMessage):
-                    for блок in сообщение.content:
-                        if isinstance(блок, TextBlock):
-                            куски.append(блок.text)
-                elif isinstance(сообщение, ResultMessage) and сообщение.is_error:
-                    log.error("работник комментариев не справился: %s", сообщение.result)
+            return await прогон(
+                mode=self.mode, prompt=текст, system=промпт.system, model=self.model,
+                effort="medium", cost=self.cost,
+                channel="комментарии", что="работник комментариев",
+                mcp_servers={"todoist": self._набор},
+                allowed_tools=["mcp__todoist"],
+                permission_mode="bypassPermissions",
+            )
         except Exception as err:
             log.exception("работник комментариев сорвался")
             return f"Не справился: {type(err).__name__}: {err}"
-        return "\n".join(к.strip() for к in куски if к.strip()).strip()
 
     # --- ответ ---
 

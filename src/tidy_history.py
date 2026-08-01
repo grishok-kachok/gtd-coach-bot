@@ -17,14 +17,7 @@ import logging
 from datetime import date
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
-
+from .backrun import прогон
 from .prompts import load as load_prompt
 
 log = logging.getLogger(__name__)
@@ -33,9 +26,13 @@ log = logging.getLogger(__name__)
 AUTO_PREFIXES = ("Автосохранение мозга", "Коуч (телеграм):", "Коуч (сервер):")
 
 class HistoryTidier:
-    def __init__(self, repo_dir: Path, model: str = "claude-fable-5") -> None:
+    def __init__(self, repo_dir: Path, model: str = "claude-fable-5",
+                 mode=None, cost=None) -> None:
         self.repo_dir = repo_dir
         self.model = model
+        # Фоновый режим: подпись сочиняется по диффу, который уже в промпте.
+        self.mode = mode
+        self.cost = cost
 
     async def _git(self, *args: str) -> tuple[int, str]:
         process = await asyncio.create_subprocess_exec(
@@ -97,22 +94,11 @@ class HistoryTidier:
             diff=diff or "(пусто)",
             subjects="\n".join(f"- {s}" for s in subjects),
         )
-        options = ClaudeAgentOptions(
-            model=self.model,
-            effort="medium",
-            tools=[],
-            system_prompt=signature.system,
-        )
-        parts: list[str] = []
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        parts.append(block.text)
-            elif isinstance(message, ResultMessage) and message.is_error:
-                log.error("подпись коммита не удалась: %s", message.result)
-                return None
-        return "\n".join(p.strip() for p in parts if p.strip()).strip() or None
+        return await прогон(
+            mode=self.mode, prompt=prompt, system=signature.system, model=self.model,
+            effort="medium", cost=self.cost,
+            channel="подпись истории", что="подпись коммита",
+        ) or None
 
     async def tidy(self, day: date) -> str | None:
         """Свернуть день в один коммит. Возвращает первую строку подписи."""

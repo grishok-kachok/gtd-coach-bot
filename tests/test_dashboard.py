@@ -70,7 +70,7 @@ def test_пустой_мозг_даёт_страницу_а_не_ошибку(м
     данные = собрать(мозг, ПоддельныйTodoist(), monkeypatch)
     страница = dashboard.нарисовать(данные, date(2026, 8, 1))
 
-    assert "<title>Курс · 2026-08-01</title>" in страница
+    assert "<title>Стратегия · 2026-08-01</title>" in страница
     assert "Пока не заполнено" in страница
     assert "Замеров ещё нет" in страница
 
@@ -150,7 +150,7 @@ def test_файл_называется_по_дате(мозг, monkeypatch, tmp_
     путь = asyncio.run(
         dashboard.собрать_файл(мозг, Path("/нет/такой.db"), "токен", куда=tmp_path / "out")
     )
-    assert путь.name == f"курс-{date.today().isoformat()}.html"
+    assert путь.name == f"стратегия-{date.today().isoformat()}.html"
     assert путь.read_text(encoding="utf-8").startswith("<!doctype html>")
 
 

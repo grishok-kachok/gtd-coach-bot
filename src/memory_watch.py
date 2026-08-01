@@ -33,14 +33,8 @@ import logging
 from datetime import date
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
 
+from .backrun import прогон
 from .notes import append
 from .prompts import load as load_prompt
 
@@ -53,27 +47,24 @@ MISSES = "промахи-памяти.md"
 class MemoryWatch:
     """Второй ночной вопрос к прожитому дню — про саму память."""
 
-    def __init__(self, brain_dir: Path, model: str = "claude-fable-5") -> None:
+    def __init__(self, brain_dir: Path, model: str = "claude-fable-5",
+                 mode=None, cost=None) -> None:
         self.brain_dir = brain_dir
         self.model = model
+        # Фоновый режим. Проверка памяти ЧИТАЕТ знания, но читает их не сама —
+        # текст подкладывается в промпт кодом, поэтому встроенные инструменты
+        # ей не нужны, а правила записи не нужны тем более: она предлагает,
+        # а записывает потом коуч в разговоре.
+        self.mode = mode
+        self.cost = cost
         self.journal = brain_dir / "память" / "журнал"
 
     async def _ask(self, prompt: str, system: str) -> str:
-        options = ClaudeAgentOptions(
-            model=self.model,
+        return await прогон(
+            mode=self.mode, prompt=prompt, system=system, model=self.model,
             effort="high",  # раз в сутки — экономить нечего
-            tools=[],       # думать, а не лазить по файлам
-            system_prompt=system,
+            cost=self.cost, channel="проверка памяти", что="проверка памяти",
         )
-        parts: list[str] = []
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        parts.append(block.text)
-            elif isinstance(message, ResultMessage) and message.is_error:
-                log.error("проверка памяти не удалась: %s", message.result)
-        return "\n".join(p.strip() for p in parts if p.strip()).strip()
 
     def _knowledge(self) -> str:
         """Что коуч знает про Василия сегодня — чтобы не предлагать записанное."""

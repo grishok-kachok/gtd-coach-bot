@@ -11,6 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault(
     "PROMPTS_DIR", str(Path(__file__).resolve().parents[2] / "plugin" / "prompts")
 )
+# Там же — части конституции и файл состава режимов. Те же правила: путь
+# читается на импорте модуля, поэтому ставится до первого импорта src.
+os.environ.setdefault(
+    "CONSTITUTION_DIR",
+    str(Path(__file__).resolve().parents[2] / "plugin" / "prompts" / "конституция"),
+)
+os.environ.setdefault(
+    "MODES_FILE", str(Path(__file__).resolve().parents[2] / "plugin" / "режимы.md")
+)
 
 # Пакет Todoist — отдельный репозиторий (один дом). В контейнере он приезжает
 # смонтированным клоном в /opt/pkg, в лаборатории лежит соседней папкой.
