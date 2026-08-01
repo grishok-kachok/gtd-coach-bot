@@ -238,7 +238,7 @@ class CoachBot:
                 # Сводку дел — к каждой реплике: коуч обязан знать картину дня всегда,
                 # а не когда вспомнит сходить в Todoist.
                 summary = await agenda.summary(self.todoist_token)
-                await self._check_load(memory, summary)
+                await self._check_load(memory, summary, text)
                 answer = await self.engine.ask(text, memory, summary)
                 await self.brain.push(text[:60].replace("\n", " "))
             except Exception as error:  # доставляем боль владельцу, а не в лог-файл
@@ -667,7 +667,7 @@ class CoachBot:
                 log.exception("ночная выжимка сорвалась")
 
 
-    async def _check_load(self, memory: str, summary: str) -> None:
+    async def _check_load(self, memory: str, summary: str, prompt: str = "") -> None:
         """Сверить то, что реально кладём в контекст, с паспортом памяти.
 
         Считаем только когда память подставляется — то есть в первый запрос новой
@@ -688,6 +688,13 @@ class CoachBot:
             # поэтому они годами не попадали в паспорт. Считает тот, кто грузит;
             # здесь мы просто спрашиваем у движка, во что обошёлся его набор.
             "описания кнопок инструментов": await self.engine.tools_weight(),
+            # Свод завалов уезжает в контекст один раз в сутки — с утренним
+            # чек-ином. Считаем его только тогда, когда он там правда есть:
+            # в остальные разы это ноль, а не «забыли посчитать».
+            "ночной обход дел — свод к утреннему чек-ину": (
+                len(prompt.encode("utf-8")) - len(prompt.split(detectors.ЗАГОЛОВОК)[0].encode("utf-8"))
+                if detectors.ЗАГОЛОВОК in prompt else 0
+            ),
         })
         if beef:
             log.warning("стартовая загрузка разошлась с паспортом: %s", beef)
