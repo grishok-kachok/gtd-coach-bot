@@ -78,3 +78,43 @@ def test_каждая_кнопка_даёт_годную_схему():
             assert set(schema["properties"]) == {f.name for f in t.fields}, t.name
             for name, prop in schema["properties"].items():
                 assert prop["type"] in ("string", "integer", "boolean"), (t.name, name)
+
+
+def test_ни_одна_кнопка_бота_не_объявлена_кириллицей(tmp_path):
+    """Кириллица в объявлении кнопки роняет КАЖДЫЙ ответ коуча.
+
+    Имя кнопки движок хотя бы ругает вслух (SEP-986), а кириллические имена
+    ПОЛЕЙ принимает молча и потом возвращает ошибочный результат на каждый ход.
+    Проверено зондом на сервере 02.08.2026: одна и та же кнопка с полем `слово`
+    падает, с полем `word` работает.
+
+    Проверяем ВСЕ собственные серверы бота разом, а не тот, на котором обожглись:
+    следующий заведётся по образцу существующих, а питон в этом проекте
+    по-русски — соблазн назвать поле по-русски будет каждый раз.
+    """
+    import asyncio
+
+    from mcp.types import ListToolsRequest
+
+    from src.dashboard_tool import build_dashboard_server
+    from src.recall import build_recall_server
+    from src.wishes import build_wishes_server
+
+    async def пусто(*a, **к):
+        return True
+
+    серверы = {
+        "wishes": build_wishes_server(tmp_path, ""),
+        "recall": build_recall_server(tmp_path / "coach.db"),
+        "dashboard": build_dashboard_server(
+            brain_dir=tmp_path, db_path=tmp_path / "coach.db",
+            todoist_token="", send=пусто),
+    }
+    for имя, сервер in серверы.items():
+        обработчик = сервер["instance"].request_handlers[ListToolsRequest]
+        кнопки = asyncio.run(обработчик(ListToolsRequest(method="tools/list"))).root.tools
+        assert кнопки, f"сервер «{имя}» не отдал ни одной кнопки"
+        for кнопка in кнопки:
+            assert кнопка.name.isascii(), f"{имя}: имя «{кнопка.name}» не латиницей"
+            for поле in (кнопка.inputSchema.get("properties") or {}):
+                assert поле.isascii(), f"{имя}.{кнопка.name}: поле «{поле}» не латиницей"
