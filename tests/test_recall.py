@@ -90,3 +90,25 @@ def test_архив_открывается_только_на_чтение(tmp_pa
             assert "readonly" in str(err).lower()
         else:  # pragma: no cover — сюда попадать не должны
             raise AssertionError("архив открылся на запись")
+
+
+def test_имя_кнопки_латиницей(tmp_path):
+    """Кириллическое имя движок принимает с предупреждением про SEP-986,
+    а потом возвращает ошибочный результат на КАЖДЫЙ ответ — коуч немеет
+    целиком. Поймано зондом 02.08.2026 до первого живого круга.
+
+    Проверяем весь набор, а не одну кнопку: следующая заведётся так же.
+    """
+    from mcp.types import ListToolsRequest
+    import asyncio
+    from src.recall import build_recall_server
+
+    сервер = build_recall_server(tmp_path / "coach.db")
+    обработчик = сервер["instance"].request_handlers[ListToolsRequest]
+    кнопки = asyncio.run(обработчик(ListToolsRequest(method="tools/list"))).root.tools
+    assert кнопки
+    for кнопка in кнопки:
+        assert кнопка.name.isascii(), f"«{кнопка.name}» — имя не латиницей, движок споткнётся"
+        # А вот описание обязано быть по-русски и говорить, КОГДА звать:
+        # описание модель видит в каждом ходу, просьбу в конституции — через раз.
+        assert "Зови" in кнопка.description
