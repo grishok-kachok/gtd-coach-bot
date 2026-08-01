@@ -26,19 +26,30 @@ from gcal_mcp.client import CalendarClient, CalendarError
 
 log = logging.getLogger(__name__)
 
-SDK_TYPES: dict[str, Any] = {"str": str, "int": int, "bool": bool}
+JSON_TYPES: dict[str, str] = {"str": "string", "int": "integer", "bool": "boolean"}
 
 
-def _describe(tool_def: manifest.Tool) -> str:
-    """Описание кнопки плюс расшифровка полей.
+def _schema(fields: tuple[manifest.Field, ...]) -> dict[str, Any]:
+    """Собрать JSON Schema кнопки из полей манифеста.
 
-    Схема SDK хранит только типы, без пояснений, поэтому «что значит
-    calendars» приходится говорить в тексте — иначе модель угадывает.
+    Схему пишем полностью, а не словарём «имя: тип»: короткая форма делает
+    **все** поля обязательными, и кнопка отказывает, пока модель не заполнит
+    каждое — включая те, что ей не нужны (поймано проверкой этапа 14).
+    Заодно сюда уезжают описания полей, которых короткая форма не хранит.
     """
-    described = [f"{f.name} — {f.description}" for f in tool_def.fields if f.description]
-    if not described:
-        return tool_def.description
-    return tool_def.description + " Поля: " + "; ".join(described) + "."
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for f in fields:
+        prop: dict[str, Any] = {"type": JSON_TYPES.get(f.kind, "string")}
+        if f.description:
+            prop["description"] = f.description
+        properties[f.name] = prop
+        if f.required:
+            required.append(f.name)
+    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return schema
 
 
 def build_calendar_server(
@@ -66,7 +77,7 @@ def build_calendar_server(
 
     built = []
     for tool_def in manifest.selected(switches):
-        schema = {f.name: SDK_TYPES.get(f.kind, str) for f in tool_def.fields}
+        schema = _schema(tool_def.fields)
 
         def make(tool_def: manifest.Tool = tool_def):
             async def handler(args: dict[str, Any]) -> dict[str, Any]:
@@ -79,7 +90,7 @@ def build_calendar_server(
                     return ok(f"Не получилось (Календарь): {err}")
             return handler
 
-        built.append(tool(tool_def.name, _describe(tool_def), schema)(make()))
+        built.append(tool(tool_def.name, tool_def.description, schema)(make()))
 
     log.info("Календарь: кнопок %d", len(built))
     return create_sdk_mcp_server(name="calendar", version="2.0.0", tools=built)

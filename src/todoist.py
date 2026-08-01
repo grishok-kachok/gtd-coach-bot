@@ -5,10 +5,9 @@
 Этот файл только разворачивает манифест в инструменты Claude Agent SDK.
 
 Почему обёрток всё-таки две. Движки принимают разные типы: MCP-сервер умеет
-поле-список объектов, SDK — только плоские (`str`, `int`, `bool`). Поэтому
-пачка задач приезжает сюда JSON-строкой и разбирается на месте. Разница
-названа в манифесте (`Field.kind == "json"`) и раскрывается здесь; всё
-остальное — общее.
+поле-список объектов, SDK — только плоские. Поэтому пачка задач приезжает
+сюда JSON-строкой и разбирается на месте. Разница названа в манифесте
+(`Field.kind == "json"`) и раскрывается здесь; всё остальное — общее.
 
 До 01.08.2026 обёртки объявляли кнопки каждая по-своему и уже разошлись:
 `update_task` здесь знал про дедлайн, а в MCP-сервере нет. Теперь разойтись
@@ -33,21 +32,39 @@ from todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 
-# Типы, которые понимает схема SDK. Список объектов сюда не помещается,
-# поэтому приезжает строкой — см. _unpack.
-SDK_TYPES: dict[str, Any] = {"str": str, "int": int, "bool": bool, "json": str}
+# Типы полей манифеста в типы JSON Schema. Список объектов SDK не принимает,
+# поэтому пачка приезжает строкой и разбирается в _unpack.
+JSON_TYPES: dict[str, str] = {
+    "str": "string", "int": "integer", "bool": "boolean", "json": "string",
+}
 
 
-def _describe(tool_def: manifest.Tool, fields: tuple[manifest.Field, ...]) -> str:
-    """Описание кнопки плюс расшифровка полей.
+def _schema(fields: tuple[manifest.Field, ...]) -> dict[str, Any]:
+    """Собрать JSON Schema кнопки из полей манифеста.
 
-    Схема SDK хранит только типы, без пояснений, поэтому «что значит
-    parent_id» приходится говорить в тексте — иначе модель угадывает.
+    Схему пишем полностью, а не словарём «имя: тип». Короткая форма выглядит
+    удобнее, но делает **все** поля обязательными: `find_tasks` без `limit`
+    отвечала «Input validation error: 'limit' is a required property»
+    (поймано проверкой этапа 14, дефект достался в наследство от прежней
+    обёртки). Модель либо получала отказ, либо заполняла все десять полей
+    ради двух нужных.
+
+    Заодно сюда уезжают описания полей: раньше их приходилось приклеивать
+    к тексту описания кнопки, потому что короткая форма пояснений не хранит.
     """
-    described = [f"{f.name} — {f.description}" for f in fields if f.description]
-    if not described:
-        return tool_def.description
-    return tool_def.description + " Поля: " + "; ".join(described) + "."
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for f in fields:
+        prop: dict[str, Any] = {"type": JSON_TYPES.get(f.kind, "string")}
+        if f.description:
+            prop["description"] = f.description
+        properties[f.name] = prop
+        if f.required:
+            required.append(f.name)
+    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return schema
 
 
 def _unpack(tool_def: manifest.Tool, args: dict[str, Any]) -> dict[str, Any] | str:
@@ -83,7 +100,7 @@ def build_todoist_server(token: str, switches: dict[str, bool] | None = None):
 
     for tool_def in manifest.selected(current_plan, switches):
         fields = tool_def.visible_fields(current_plan)
-        schema = {f.name: SDK_TYPES.get(f.kind, str) for f in fields}
+        schema = _schema(fields)
 
         def make(tool_def: manifest.Tool = tool_def):
             async def handler(args: dict[str, Any]) -> dict[str, Any]:
@@ -101,7 +118,7 @@ def build_todoist_server(token: str, switches: dict[str, bool] | None = None):
             return handler
 
         built.append(
-            tool(tool_def.name, _describe(tool_def, fields), schema)(make())
+            tool(tool_def.name, tool_def.description, schema)(make())
         )
 
     log.info(
