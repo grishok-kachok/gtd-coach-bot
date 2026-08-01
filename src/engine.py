@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -89,6 +90,34 @@ class CoachEngine:
             build_calendar_server(**calendar, switches=self._switches["calendar"])
             if calendar else None
         )
+
+    async def tools_weight(self) -> int:
+        """Сколько байт занимают описания кнопок, уезжающие в каждую сессию.
+
+        Это тоже стартовая загрузка, просто её кладёт в контекст не наш код,
+        а движок — и ровно поэтому она годами не попадала в паспорт и не
+        считалась. Замер 01.08.2026: 25 кнопок ≈ 19 КБ, около 750 байт
+        за штуку. Столько же стоит выключить кнопку тумблером.
+        """
+        from mcp.types import ListToolsRequest
+
+        total = 0
+        for server in (self.todoist_server, self.calendar_server,
+                       self.wishes_server, self.dashboard_server):
+            if not server:
+                continue
+            try:
+                handler = server["instance"].request_handlers[ListToolsRequest]
+                listed = (await handler(ListToolsRequest(method="tools/list"))).root.tools
+            except Exception:  # версия SDK сменила внутренности — не повод падать
+                log.warning("не удалось померить кнопки сервера %s", server.get("name"))
+                continue
+            payload = [
+                {"name": t.name, "description": t.description, "inputSchema": t.inputSchema}
+                for t in listed
+            ]
+            total += len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        return total
 
     def _settings(self) -> dict | None:
         """Настройки из мозга. Сломаны или недоступны — None, живём на прежних."""

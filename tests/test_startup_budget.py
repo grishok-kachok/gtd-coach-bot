@@ -59,3 +59,23 @@ def test_нет_паспорта_нет_претензий(tmp_path):
 def test_сломанный_паспорт_говорит_вслух(tmp_path):
     (tmp_path / "config.yaml").write_text("startup: {budget: [\n", encoding="utf-8")
     assert "не разбирается" in check(tmp_path, {})
+
+
+def test_незаявленное_тоже_считается_в_сумму(tmp_path):
+    """Найдено 01.08.2026: описания кнопок грузились, в паспорте не значились —
+    и не входили в сумму. Сторож жаловался на строку, но потолок не пробивал."""
+    (tmp_path / "config.yaml").write_text(
+        "startup:\n  budget: 1000\n  loads:\n    - what: конституция\n      size: 900\n",
+        encoding="utf-8",
+    )
+    beef = check(tmp_path, {"конституция": 900, "описания кнопок инструментов": 500})
+    assert "не объявлен" in beef
+    assert "ПОТОЛОК ПРОБИТ" in beef and "1400" in beef
+
+
+def test_в_норме_сторож_молчит_и_с_незаявленным(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "startup:\n  budget: 5000\n  loads:\n    - what: конституция\n      size: 900\n",
+        encoding="utf-8",
+    )
+    assert check(tmp_path, {"конституция": 900}) == ""
