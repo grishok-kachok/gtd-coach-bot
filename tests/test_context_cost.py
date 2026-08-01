@@ -56,15 +56,16 @@ def test_запись_и_чтение_суток(tmp_path):
 def test_первый_ход_отличается_от_середины_разговора(tmp_path):
     """Мерить режим по середине разговора бессмысленно: померишь болтовню.
 
-    Первый ход отличаем по тому, что кэша он ещё не читал.
+    Первый ход отмечает сам движок, а не догадка по кэшу: первый ход
+    с цепочкой вызовов инструментов кэш читает вовсю.
     """
     журнал = ContextCost(tmp_path / "coach.db")
     asyncio.run(журнал.записать("telegram", "рабочий", "m", {
         "input_tokens": 100, "cache_creation_input_tokens": 38000,
-        "cache_read_input_tokens": 0, "output_tokens": 10}))
+        "cache_read_input_tokens": 0, "output_tokens": 10}, 38100, True))
     asyncio.run(журнал.записать("telegram", "рабочий", "m", {
         "input_tokens": 50, "cache_creation_input_tokens": 200,
-        "cache_read_input_tokens": 38000, "output_tokens": 10}))
+        "cache_read_input_tokens": 38000, "output_tokens": 10}, 38250, False))
     assert журнал.первый_ход("рабочий") == 38100
     assert журнал.первый_ход("полный") is None
 
@@ -73,3 +74,34 @@ def test_пустой_usage_не_пишется(tmp_path):
     журнал = ContextCost(tmp_path / "coach.db")
     assert asyncio.run(журнал.записать("telegram", "рабочий", "m", None)) == {}
     assert журнал.сутки(сегодня()) == []
+
+
+def test_рюкзак_и_ход_считаются_отдельно(tmp_path):
+    """Ход коуча — цепочка: сходил в Todoist, заглянул в календарь, ответил.
+    Каждый шаг заезжает в модель заново, и итоговый usage считает их все.
+    Живой круг 02.08.2026: рюкзак 41 497, весь ход 126 516. Потолок стоит
+    на рюкзаке — он про то, что мы положили, а не про усердие модели.
+    """
+    журнал = ContextCost(tmp_path / "coach.db")
+    asyncio.run(журнал.записать("telegram", "рабочий", "m", {
+        "input_tokens": 200, "cache_creation_input_tokens": 80000,
+        "cache_read_input_tokens": 46316, "output_tokens": 500}, 41497, True))
+    assert журнал.первый_ход("рабочий") == 41497          # рюкзак
+    строки = журнал.сутки(сегодня())
+    assert строки[0][3] == 126516                          # весь ход
+
+
+def test_старая_база_дотягивается_до_свежей_схемы(tmp_path):
+    """Колонка рюкзака добавилась после того, как таблица уже жила."""
+    import sqlite3
+    путь = tmp_path / "coach.db"
+    with sqlite3.connect(путь) as db:
+        db.execute("CREATE TABLE context_cost (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                   "at TEXT NOT NULL, day TEXT NOT NULL, channel TEXT NOT NULL, "
+                   "mode TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', "
+                   "input INTEGER, cache_create INTEGER, cache_read INTEGER, output INTEGER)")
+        db.execute("INSERT INTO context_cost(at, day, channel, mode, input, cache_create,"
+                   " cache_read, output) VALUES('t','2026-08-01','telegram','рабочий',1,2,3,4)")
+    журнал = ContextCost(путь)          # миграция на открытии
+    asyncio.run(журнал.записать("telegram", "рабочий", "m", USAGE, 40000, True))
+    assert журнал.первый_ход("рабочий") == 40000

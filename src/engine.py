@@ -133,8 +133,8 @@ class CoachEngine:
         from mcp.types import ListToolsRequest
 
         total = 0
-        for server in (self.todoist_server, self.calendar_server,
-                       self.wishes_server, self.dashboard_server, self.undo_server):
+        for server in (self.todoist_server, self.calendar_server, self.wishes_server,
+                       self.dashboard_server, self.undo_server, self.recall_server):
             if not server:
                 continue
             try:
@@ -340,11 +340,18 @@ class CoachEngine:
         notified = False
         subtype = None
         usage: object = None
+        рюкзак = 0
         model = str(values["модель_разговора"]) if values else self.model
         async with ClaudeSDKClient(options=self._options(resume, mode, values)) as client:
             await client.query(text)
             async for message in client.receive_response():
                 if isinstance(message, AssistantMessage):
+                    # ПЕРВОЕ сообщение модели и есть рюкзак: столько было
+                    # у неё в голове до первого слова. Дальше ход идёт цепочкой
+                    # (сходил в Todoist, заглянул в календарь, ответил), и каждый
+                    # шаг заезжает заново — итоговый `usage` считает их все.
+                    if not heard_model:
+                        рюкзак = контекст(разобрать(message.usage))
                     heard_model = True
                     for block in message.content:
                         if isinstance(block, TextBlock):
@@ -363,7 +370,8 @@ class CoachEngine:
                     if message.is_error:
                         log.error("движок вернул ошибку: %s", message.result)
 
-        await self._записать_цену(channel, mode, model, usage, первый=resume is None)
+        await self._записать_цену(channel, mode, model, usage, рюкзак,
+                                  первый=resume is None)
 
         answer = "\n".join(p.strip() for p in parts if p.strip())
         if answer:
@@ -391,7 +399,7 @@ class CoachEngine:
         return "…(коуч промолчал — похоже, что-то пошло не так)"
 
     async def _записать_цену(self, channel: str, mode: Режим, model: str, usage: object,
-                             *, первый: bool = False) -> None:
+                             рюкзак: int = 0, *, первый: bool = False) -> None:
         """Отметить в базе, во что обошёлся этот ход.
 
         Число берём у модели, а не считаем сами: `usage` — её собственный счёт.
@@ -403,16 +411,19 @@ class CoachEngine:
             self.последний_контекст = None
             self.последний_первый = False
             return
-        self.последний_контекст = контекст(числа)
+        # Потолок стоит на РЮКЗАКЕ, а не на всём ходе: он про то, что мы
+        # положили, а не про то, насколько усердной оказалась модель.
+        self.последний_контекст = рюкзак or None
         self.последний_первый = первый
         log.info(
-            "контекст: режим %s, канал %s, %d токенов (свежих %d, кэш +%d/%d), выдано %d",
-            mode.имя, channel, контекст(числа), числа["input"],
+            "контекст: режим %s, канал %s — рюкзак %d, весь ход %d токенов "
+            "(свежих %d, кэш +%d/%d), выдано %d",
+            mode.имя, channel, рюкзак, контекст(числа), числа["input"],
             числа["cache_create"], числа["cache_read"], числа["output"],
         )
         if self.cost is None:
             return
         try:
-            await self.cost.записать(channel, mode.имя, model, usage)
+            await self.cost.записать(channel, mode.имя, model, usage, рюкзак, первый)
         except Exception:
             log.exception("не смог записать цену контекста")
