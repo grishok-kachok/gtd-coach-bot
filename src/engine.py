@@ -19,6 +19,7 @@ from claude_agent_sdk import (
 )
 
 from .gcal import build_calendar_server
+from .settings import read as read_settings
 from .sessions import SessionStorage
 from .todoist import build_todoist_server
 from .dashboard_tool import build_dashboard_server
@@ -62,21 +63,75 @@ class CoachEngine:
         self.brain_dir = brain_dir
         self.sessions = session_storage
         self.system_prompt = system_prompt
+        # Модель — умолчание на случай, если в мозге настройки ещё нет.
+        # Настоящая берётся перед каждым ответом (см. _current_model): движок
+        # живёт ровно один ответ, поэтому «переключись на Opus» работает
+        # со следующей реплики, без перезапуска и без потери разговора.
         self.model = model
         self.effort = effort
         # Папки за пределами мозга, куда движку тоже нужен доступ. Сейчас это
         # присланные картинки: в мозге им не место (он репозиторий), а Read по
         # умолчанию видит только cwd — без этого списка он до них не дотянется.
         self.extra_dirs = [str(path) for path in (extra_dirs or [])]
-        self.todoist_server = build_todoist_server(todoist_token)
+        self.todoist_token = todoist_token
+        self.calendar_config = calendar
+        # Тумблеры кнопок: какие инструменты вообще объявлять движку. Живут
+        # в мозге рядом с моделью, поэтому здесь только первое чтение —
+        # дальше набор пересобирается, когда человек его поменял.
+        self._switches: dict[str, dict[str, bool]] = self._read_switches()
+        self.todoist_server = build_todoist_server(todoist_token, self._switches["todoist"])
         # Заявки: «хочу, чтобы ты умел X» — коуч записывает, а не делает.
         self.wishes_server = build_wishes_server(brain_dir, todoist_token)
         # Дашборд — файл в телеграм. Отправка обязана случаться, значит инструмент.
         self.dashboard_server = build_dashboard_server(**dashboard) if dashboard else None
         # Календарь подключаем только когда заданы креды — без них бот работает как прежде.
-        self.calendar_server = build_calendar_server(**calendar) if calendar else None
+        self.calendar_server = (
+            build_calendar_server(**calendar, switches=self._switches["calendar"])
+            if calendar else None
+        )
+
+    def _settings(self) -> dict | None:
+        """Настройки из мозга. Сломаны или недоступны — None, живём на прежних."""
+        try:
+            values, problems = read_settings(self.brain_dir)
+        except Exception:  # мозг недоступен — не повод молчать
+            return None
+        if problems:
+            log.error("настройки в мозге сломаны, оставляю прежние: %s", "; ".join(problems))
+            return None
+        return values
+
+    def _read_switches(self) -> dict[str, dict[str, bool]]:
+        values = self._settings() or {}
+        return {
+            "todoist": dict(values.get("кнопки_todoist") or {}),
+            "calendar": dict(values.get("кнопки_календаря") or {}),
+        }
+
+    def _refresh_tools(self, values: dict | None) -> None:
+        """Пересобрать наборы кнопок, если человек поменял тумблеры.
+
+        Сборка не ходит в сеть — это создание объектов по манифесту, — поэтому
+        проверять можно перед каждым ответом. Без этого «выключи статистику»
+        работало бы только после перезапуска, а обещано, что работает как фраза.
+        """
+        fresh = {
+            "todoist": dict((values or {}).get("кнопки_todoist") or {}),
+            "calendar": dict((values or {}).get("кнопки_календаря") or {}),
+        }
+        if fresh == self._switches:
+            return
+        log.info("тумблеры кнопок изменились, пересобираю наборы: %s", fresh)
+        self._switches = fresh
+        self.todoist_server = build_todoist_server(self.todoist_token, fresh["todoist"])
+        if self.calendar_config:
+            self.calendar_server = build_calendar_server(
+                **self.calendar_config, switches=fresh["calendar"])
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:
+        # Настройки читаются один раз на ответ: и модель, и тумблеры — оттуда.
+        values = self._settings()
+        self._refresh_tools(values)
         mcp_servers = {"todoist": self.todoist_server, "wishes": self.wishes_server}
         allowed = MEMORY_TOOLS + ["mcp__todoist", "mcp__wishes"]
         if self.calendar_server is not None:
@@ -88,7 +143,7 @@ class CoachEngine:
         return ClaudeAgentOptions(
             system_prompt=self.system_prompt,
             cwd=str(self.brain_dir),
-            model=self.model,
+            model=str(values["модель_разговора"]) if values else self.model,
             effort=self.effort,
             resume=resume,
             permission_mode="bypassPermissions",

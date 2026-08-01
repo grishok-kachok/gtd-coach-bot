@@ -1,21 +1,23 @@
-"""Инструменты Todoist для коуча — тонкие MCP-обёртки над ядром coach-todoist-mcp.
+"""Инструменты Todoist для движка бота — обёртка над манифестом кнопок.
 
-Вся логика (запросы к Todoist unified API v1, сборка человекочитаемого текста)
-живёт в `.coach_todoist_mcp.core`. Здесь только:
-  открыть TodoistClient(token) → позвать функцию-«кнопку» → обернуть её str
-  в MCP-ответ {"content":[{"type":"text","text":...}]}.
+Здесь не объявлено ни одной кнопки. Список, описания и поля живут в манифесте
+пакета `todoist-mcp` (`coach_todoist_mcp.tools`), логика — в его же `core.py`.
+Этот файл только разворачивает манифест в инструменты Claude Agent SDK.
 
-Так одно ядро служит и боту (этот файл), и MCP-серверу на ноутбуке.
+Почему обёрток всё-таки две. Движки принимают разные типы: MCP-сервер умеет
+поле-список объектов, SDK — только плоские (`str`, `int`, `bool`). Поэтому
+пачка задач приезжает сюда JSON-строкой и разбирается на месте. Разница
+названа в манифесте (`Field.kind == "json"`) и раскрывается здесь; всё
+остальное — общее.
 
-Один дом кода: пакет `coach_todoist_mcp` не копируется в этот репозиторий —
-он приезжает из отдельного репо vefmvai/coach-todoist-mcp. На сервере его клон
-`/opt/apps/coach-todoist-mcp` монтируется в контейнер как /opt/pkg и попадает
-в PYTHONPATH (см. docker-compose.yml). Поэтому импорт — обычный абсолютный.
+До 01.08.2026 обёртки объявляли кнопки каждая по-своему и уже разошлись:
+`update_task` здесь знал про дедлайн, а в MCP-сервере нет. Теперь разойтись
+нечему.
 
-Комментарии-пометки авторства отменены решением владельца 23.07.2026: агент
-больше никогда не пишет «создана/закрыта Claude со слов Василия».
+Один дом кода: пакет не копируется в этот репозиторий — он приезжает
+отдельным репо и монтируется в контейнер (см. docker-compose.yml).
 Egress к Todoist из РФ — через Xray-мост: TodoistClient(trust_env=True) сам
-подхватывает HTTPS_PROXY из окружения контейнера (порт 1080).
+подхватывает HTTPS_PROXY из окружения контейнера.
 """
 
 from __future__ import annotations
@@ -25,242 +27,85 @@ import logging
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
-from coach_todoist_mcp import core
+from coach_todoist_mcp import plan as plan_module
+from coach_todoist_mcp import tools as manifest
 from coach_todoist_mcp.client import TodoistClient, TodoistError
 
 log = logging.getLogger(__name__)
 
+# Типы, которые понимает схема SDK. Список объектов сюда не помещается,
+# поэтому приезжает строкой — см. _unpack.
+SDK_TYPES: dict[str, Any] = {"str": str, "int": int, "bool": bool, "json": str}
 
-def build_todoist_server(token: str):
+
+def _describe(tool_def: manifest.Tool, fields: tuple[manifest.Field, ...]) -> str:
+    """Описание кнопки плюс расшифровка полей.
+
+    Схема SDK хранит только типы, без пояснений, поэтому «что значит
+    parent_id» приходится говорить в тексте — иначе модель угадывает.
+    """
+    described = [f"{f.name} — {f.description}" for f in fields if f.description]
+    if not described:
+        return tool_def.description
+    return tool_def.description + " Поля: " + "; ".join(described) + "."
+
+
+def _unpack(tool_def: manifest.Tool, args: dict[str, Any]) -> dict[str, Any] | str:
+    """Привести пришедшие поля к тому виду, которого ждёт манифест.
+
+    Возвращает либо готовые аргументы, либо строку с объяснением ошибки —
+    её показываем модели вместо падения.
+    """
+    prepared = dict(args)
+    for f in tool_def.fields:
+        if f.kind != "json" or f.name not in prepared:
+            continue
+        raw = prepared.get(f.name)
+        if isinstance(raw, (list, dict)) or raw in (None, ""):
+            continue
+        try:
+            prepared[f.name] = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as err:
+            return f"Поле «{f.name}» не разобрано как JSON: {err}"
+        if not isinstance(prepared[f.name], list):
+            return f"Поле «{f.name}» должно быть JSON-массивом объектов."
+    return prepared
+
+
+def build_todoist_server(token: str, switches: dict[str, bool] | None = None):
+    """Собрать MCP-сервер движка из манифеста: доступное на тарифе и включённое."""
+
     def ok(text: str) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": text}]}
 
-    async def run(fn, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """Открыть клиент, позвать функцию ядра, вернуть её текст. Ошибку —
-        отдать словами, а не бросать: модель должна её увидеть и объяснить."""
-        try:
-            async with TodoistClient(token) as client:
-                return ok(await fn(client, *args, **kwargs))
-        except TodoistError as err:
-            log.warning("Todoist: %s", err)
-            return ok(f"Не получилось (Todoist): {err}")
+    current_plan = plan_module.current(token)
+    built = []
 
-    def collect(args: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
-        """Собрать только переданные (непустые) поля — ядро само разберёт."""
-        return {k: args[k] for k in keys if args.get(k) not in (None, "")}
+    for tool_def in manifest.selected(current_plan, switches):
+        fields = tool_def.visible_fields(current_plan)
+        schema = {f.name: SDK_TYPES.get(f.kind, str) for f in fields}
 
-    # ── чтение ──────────────────────────────────────────────────────────────
+        def make(tool_def: manifest.Tool = tool_def):
+            async def handler(args: dict[str, Any]) -> dict[str, Any]:
+                prepared = _unpack(tool_def, args)
+                if isinstance(prepared, str):
+                    return ok(prepared)
+                try:
+                    async with TodoistClient(token) as client:
+                        return ok(await tool_def.run(client, prepared))
+                except TodoistError as err:
+                    # Ошибку отдаём словами, а не бросаем: модель должна её
+                    # увидеть и объяснить, а не молча потерять действие.
+                    log.warning("Todoist: %s", err)
+                    return ok(f"Не получилось (Todoist): {err}")
+            return handler
 
-    @tool(
-        "find_tasks",
-        "Показать задачи Todoist по фильтру на языке Todoist "
-        "(today, overdue, 7 days, @актив, #Личное, no date & !@когда-нибудь). "
-        "Главный способ узнать, что у Василия в делах.",
-        {"filter": str, "limit": int},
-    )
-    async def find_tasks(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(core.find_tasks, args.get("filter") or "today", int(args.get("limit") or 30))
-
-    @tool(
-        "get_task",
-        "Карточка одной задачи по id: описание, при желании подзадачи и комментарии. "
-        "Нужна, когда надо копнуть конкретное дело, а не список.",
-        {"task_id": str, "include_subtasks": bool, "include_comments": bool},
-    )
-    async def get_task(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(
-            core.get_task,
-            str(args["task_id"]),
-            include_subtasks=args.get("include_subtasks", True),
-            include_comments=args.get("include_comments", False),
+        built.append(
+            tool(tool_def.name, _describe(tool_def, fields), schema)(make())
         )
 
-    @tool(
-        "get_comments",
-        "Прочитать комментарии задачи по id. В квадратных скобках — id самого "
-        "комментария, он нужен для delete_comment.",
-        {"task_id": str},
+    log.info(
+        "Todoist: кнопок %d, тариф %s (%s)",
+        len(built), current_plan.name, current_plan.source,
     )
-    async def get_comments(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(core.get_comments, str(args["task_id"]))
-
-    @tool(
-        "get_structure",
-        "Карта Todoist: проекты, секции и метки — чтобы класть задачу в правильное место.",
-        {},
-    )
-    async def get_structure(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(core.get_structure)
-
-    @tool(
-        "completed_history",
-        "История завершённых задач за период (since и until — даты YYYY-MM-DD). "
-        "Для обзора «что реально сделано» за неделю/месяц, при желании по одному проекту.",
-        {"since": str, "until": str, "project_id": str, "limit": int},
-    )
-    async def completed_history(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(
-            core.completed_history,
-            args["since"],
-            args["until"],
-            project_id=args.get("project_id") or None,
-            limit=int(args.get("limit") or 50),
-        )
-
-    # ── запись: задачи ──────────────────────────────────────────────────────
-
-    _TASK_FIELDS = (
-        "project_id", "section_id", "parent_id", "due_string",
-        "deadline_date", "priority", "labels", "description",
-    )
-
-    @tool(
-        "add_task",
-        "Создать задачу (или подзадачу — через parent_id) в Todoist. Приоритет: "
-        "4 — самый высокий (p1 в приложении), 1 — обычный. due_string — словами "
-        "по-русски: «завтра», «в пятницу», «каждый пн». deadline_date — жёсткий "
-        "дедлайн YYYY-MM-DD. labels — через запятую. duration_minutes — оценка времени.",
-        {
-            "content": str, "project_id": str, "section_id": str, "parent_id": str,
-            "due_string": str, "deadline_date": str, "priority": int, "labels": str,
-            "description": str, "duration_minutes": int,
-        },
-    )
-    async def add_task(args: dict[str, Any]) -> dict[str, Any]:
-        fields = collect(args, _TASK_FIELDS)
-        if args.get("priority"):
-            fields["priority"] = int(args["priority"])
-        if args.get("duration_minutes"):
-            fields["duration"] = int(args["duration_minutes"])
-            fields["duration_unit"] = "minute"
-        return await run(core.add_task, args["content"], **fields)
-
-    @tool(
-        "add_tasks_bulk",
-        "Создать пачку задач за раз. tasks_json — JSON-массив объектов, каждый как "
-        "у add_task: [{\"content\":\"...\",\"project_id\":\"...\",\"due_string\":\"завтра\"}, ...]. "
-        "Удобно, когда крупное дело распадается на список подзадач.",
-        {"tasks_json": str},
-    )
-    async def add_tasks_bulk(args: dict[str, Any]) -> dict[str, Any]:
-        try:
-            tasks = json.loads(args["tasks_json"])
-        except (json.JSONDecodeError, TypeError) as err:
-            return ok(f"tasks_json не разобран как JSON-массив: {err}")
-        if not isinstance(tasks, list):
-            return ok("tasks_json должен быть JSON-массивом объектов.")
-        return await run(core.add_tasks_bulk, tasks)
-
-    @tool(
-        "update_task",
-        "Изменить задачу: перенести срок (due_string), сменить приоритет, метки, "
-        "текст, описание, дедлайн, длительность. Для переноса дат у повторяющихся "
-        "задач используй due_string. Смену проекта/родителя делай через move_task.",
-        {
-            "task_id": str, "content": str, "due_string": str, "deadline_date": str,
-            "priority": int, "labels": str, "description": str, "duration_minutes": int,
-        },
-    )
-    async def update_task(args: dict[str, Any]) -> dict[str, Any]:
-        fields = collect(args, ("content", "due_string", "deadline_date", "labels", "description"))
-        if args.get("priority"):
-            fields["priority"] = int(args["priority"])
-        if args.get("duration_minutes"):
-            fields["duration"] = int(args["duration_minutes"])
-            fields["duration_unit"] = "minute"
-        return await run(core.update_task, str(args["task_id"]), **fields)
-
-    @tool(
-        "complete_task",
-        "Закрыть задачу в Todoist со слов Василия. Чтобы, наоборот, вернуть "
-        "ошибочно закрытую задачу — reopen=true.",
-        {"task_id": str, "reopen": bool},
-    )
-    async def complete_task(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(core.complete_task, str(args["task_id"]), reopen=args.get("reopen", False))
-
-    @tool(
-        "move_task",
-        "Перенести задачу в другой проект/секцию или сделать её подзадачей (parent_id). "
-        "Именно для смены места — не для смены срока/текста (это update_task).",
-        {"task_id": str, "project_id": str, "section_id": str, "parent_id": str},
-    )
-    async def move_task(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(
-            core.move_task,
-            str(args["task_id"]),
-            project_id=args.get("project_id") or None,
-            section_id=args.get("section_id") or None,
-            parent_id=args.get("parent_id") or None,
-        )
-
-    @tool(
-        "delete_task",
-        "Удалить задачу безвозвратно (каскадом снесёт подзадачи). Необратимо, поэтому "
-        "срабатывает только с confirm=true. Обычно закрывают (complete_task), а не удаляют.",
-        {"task_id": str, "confirm": bool},
-    )
-    async def delete_task(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(core.delete_task, str(args["task_id"]), confirm=args.get("confirm", False))
-
-    @tool(
-        "quick_add",
-        "Создать задачу одной строкой на естественном языке в стиле Todoist: "
-        "«Позвонить Тане завтра в 15 #Личное @актив p1». Быстрый ввод, когда всё в одной фразе.",
-        {"text": str},
-    )
-    async def quick_add(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(core.quick_add, args["text"])
-
-    # ── комментарии и структура ─────────────────────────────────────────────
-
-    @tool(
-        "add_comment",
-        "Оставить комментарий к задаче по id (заметка, контекст, договорённость).",
-        {"task_id": str, "content": str},
-    )
-    async def add_comment(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(core.add_comment, str(args["task_id"]), args["content"])
-
-    @tool(
-        "delete_comment",
-        "Удалить комментарий задачи безвозвратно по его id (id виден в get_comments "
-        "и в get_task с include_comments=true). Необратимо, поэтому срабатывает "
-        "только с confirm=true.",
-        {"comment_id": str, "confirm": bool},
-    )
-    async def delete_comment(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(core.delete_comment, str(args["comment_id"]), confirm=args.get("confirm", False))
-
-    @tool(
-        "manage_structure",
-        "Управление структурой Todoist. action: create_project | create_section | "
-        "create_label | rename_label | delete_label. name — имя проекта/секции/метки "
-        "(метку можно писать с @ или без, регистр не важен). Для секции нужен "
-        "project_id; для вложенного проекта — parent_id. rename_label: name — как "
-        "метка называется сейчас, new_name — как назвать. delete_label срабатывает "
-        "только с confirm=true и снимает метку со всех задач. "
-        "Пользуйся редко и осознанно — структуру задаёт Василий.",
-        {"action": str, "name": str, "project_id": str, "parent_id": str,
-         "new_name": str, "confirm": bool},
-    )
-    async def manage_structure(args: dict[str, Any]) -> dict[str, Any]:
-        return await run(
-            core.manage_structure,
-            args["action"],
-            args["name"],
-            project_id=args.get("project_id") or None,
-            parent_id=args.get("parent_id") or None,
-            new_name=args.get("new_name") or None,
-            confirm=args.get("confirm", False),
-        )
-
-    return create_sdk_mcp_server(
-        name="todoist",
-        version="2.1.0",
-        tools=[
-            find_tasks, get_task, get_comments, get_structure, completed_history,
-            add_task, add_tasks_bulk, update_task, complete_task, move_task,
-            delete_task, quick_add, add_comment, delete_comment, manage_structure,
-        ],
-    )
+    return create_sdk_mcp_server(name="todoist", version="3.0.0", tools=built)

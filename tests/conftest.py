@@ -15,3 +15,6 @@ os.environ.setdefault(
 # Пакет Todoist — отдельный репозиторий (один дом). В контейнере он приезжает
 # смонтированным клоном в /opt/pkg, в лаборатории лежит соседней папкой.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "todoist-mcp" / "src"))
+
+# То же для Календаря: с этапа 14 он тоже отдельный репозиторий, а не файл в боте.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "gcal-mcp" / "src"))

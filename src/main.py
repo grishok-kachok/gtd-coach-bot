@@ -32,6 +32,7 @@ from .memory_watch import MemoryWatch
 from .prompts import followups, load as load_prompt, missing as missing_prompts
 from .retry import retry_network
 from .rhythms import describe, path_in, read
+from . import settings as coach_settings
 from .sessions import SessionStorage
 from .startup_budget import check as check_budget
 from .tidy_history import HistoryTidier
@@ -105,9 +106,16 @@ class CoachBot:
         self.rhythms, problems = read(self.brain_dir)
         if problems:
             log.error("ритмы в мозге сломаны, беру умолчания: %s", "; ".join(problems))
-        self.digester = Digester(self.brain_dir, self.archive, model=env("DIGEST_MODEL", "claude-fable-5"))
-        self.tidier = HistoryTidier(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
-        self.memory_watch = MemoryWatch(self.brain_dir, model=env("DIGEST_MODEL", "claude-fable-5"))
+        # Настройки (модель и тумблеры кнопок) живут в мозге рядом с ритмами.
+        # Файл читает код — значит код и заводит его, если человек ещё не завёл.
+        coach_settings.ensure(self.brain_dir, datetime.now(MOSCOW).date().isoformat())
+        values, beefs = coach_settings.read(self.brain_dir)
+        if beefs:
+            log.error("настройки в мозге сломаны, беру умолчания: %s", "; ".join(beefs))
+        night_model = str(values["модель_ночной_работы"])
+        self.digester = Digester(self.brain_dir, self.archive, model=night_model)
+        self.tidier = HistoryTidier(self.brain_dir, model=night_model)
+        self.memory_watch = MemoryWatch(self.brain_dir, model=night_model)
         # Несгораемая история дел: Todoist на Free помнит ~неделю, снимок помнит всё.
         self.snapshot = TodoistSnapshot(
             Path(env("ARCHIVE_DB", "/archive/coach.db")), self.todoist_token
