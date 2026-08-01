@@ -26,9 +26,12 @@ from . import agenda
 from .archive import Archive
 from .backstage import raise_task
 from .brain import Brain
+from . import detectors
 from .digest import Digester
 from .engine import CoachEngine
 from .memory_watch import MemoryWatch
+from . import profile
+from .promise import PromiseWatch
 from .prompts import followups, load as load_prompt, missing as missing_prompts
 from .retry import retry_network
 from .rhythms import describe, path_in, read
@@ -120,6 +123,9 @@ class CoachBot:
         self.snapshot = TodoistSnapshot(
             Path(env("ARCHIVE_DB", "/archive/coach.db")), self.todoist_token
         )
+        # Обещание дня разбирается по тому же архиву и ложится в ту же базу:
+        # дом цифр — база, дом смысла — журнал.
+        self.promises = PromiseWatch(self.snapshot.db_path, model=night_model)
         self.broken_rhythms = "; ".join(problems)
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
@@ -498,9 +504,37 @@ class CoachBot:
             channel = "monthly"
         else:
             prompt = load_prompt(name).text
+            if name == "чекин-утро":
+                # Бриф считается ЗДЕСЬ, а не ночью. Ночная проза состарилась бы
+                # за семь часов, а второй вызов модели ничего бы не добавил:
+                # утренний чек-ин и так идёт через модель с полным контекстом.
+                # Код даёт цифры, коуч решает, что из них главное.
+                prompt = self._with_brief(prompt, await self._обход())
         sent_at = now.isoformat(timespec="seconds")
         await self._think_and_reply(prompt, self.owner_id, context, channel=channel)
         self._schedule_followup(context, sent_at, attempt=1)
+
+    async def _обход(self) -> detectors.Свод:
+        """Обход завалов. Упал — пустой свод и жалоба в лог: чек-ин важнее."""
+        try:
+            return await detectors.обойти(
+                self.todoist_token, self.snapshot.db_path, self._calendar_config()
+            )
+        except Exception:
+            log.exception("обход завалов сорвался")
+            return detectors.Свод()
+
+    @staticmethod
+    def _with_brief(prompt: str, свод: detectors.Свод) -> str:
+        """Подложить свод к чек-ину. Пусто — не подкладываем ничего.
+
+        Подстановка, а не просьба «посмотри завалы» в тексте: просьба
+        срабатывает, если модель не отвлеклась, — на этом в июле протекло
+        знание. Пустой свод не превращается в строку «всё в норме»: коуч
+        не должен отчитываться о проверке, которая ничего не нашла.
+        """
+        текст = свод.текст()
+        return f"{prompt}\n\n{текст}" if текст else prompt
 
     def _schedule_followup(self, context: ContextTypes.DEFAULT_TYPE, sent_at: str, attempt: int) -> None:
         """Завести следующую попытку достучаться, если она ещё в запасе."""
@@ -576,6 +610,37 @@ class CoachBot:
                 # Снимок дел — прежде укрупнений: он должен успеть сохранить то,
                 # что человек может удалить завтра. Ноль токенов, чистый код.
                 await self.snapshot.run(today)
+
+                # Обещание дня против факта. Разбор идёт ПОСЛЕ снимка: список
+                # закрытых за вчера должен быть уже в базе, иначе сверять не с чем.
+                await self.promises.run(yesterday, self.digester.transcript_of(yesterday))
+
+                # Обход завалов ночью нужен не ради брифа (тот считается утром),
+                # а ради счёта суток: лампочка, горящая третьи сутки подряд, —
+                # это уже долг, и он дёргает за рукав задачей. Прибор без
+                # реакции — декорация.
+                свод = await self._обход()
+                висит = await asyncio.to_thread(
+                    detectors.запомнить, self.snapshot.db_path, свод, today
+                )
+                for отклонение in висит:
+                    await raise_task(
+                        self.todoist_token, "завал",
+                        f"{today.isoformat()}: {отклонение.строка}",
+                    )
+
+                # Профиль: показания приборов про самого человека. Состояние
+                # перезаписываем каждую ночь, строку в журнал — раз в неделю,
+                # в ту же ночь, что собирается недельная выжимка. Ряд, а не
+                # одна оценка: важно не «сегодня столько», а «поехало».
+                показатели = await asyncio.to_thread(
+                    profile.собрать, self.snapshot.db_path, self.archive.path, today
+                )
+                if показатели:
+                    await asyncio.to_thread(
+                        profile.записать, self.brain_dir, показатели, today,
+                        yesterday.weekday() == 6,
+                    )
 
                 # Укрупняем только законченные периоды и только по календарю.
                 if yesterday.weekday() == 6:  # воскресенье закрыло неделю

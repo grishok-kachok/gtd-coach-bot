@@ -34,20 +34,15 @@ import yaml
 
 from todoist_mcp.client import TodoistClient, TodoistError
 
+# Нормы приборов и работа по целям живут у сторожа завалов (`detectors.py`):
+# витрина и утренний бриф обязаны показывать одно и то же, а до этапа 09
+# нормы были объявлены здесь и второму потребителю пришлось бы их повторить.
+from .detectors import GAUGES, по_фильтру as _счёт, цели as _цели  # noqa: F401
+
 log = logging.getLogger(__name__)
 
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 YAML_BLOCK = re.compile(r"```yaml\s*\n(.*?)\n```", re.DOTALL)
-
-# Приборы панели: у каждого свой вопрос и своё исправное состояние.
-# Порог «В игре» намеренно не назначен — считается по данным через год.
-GAUGES = (
-    ("Потеряшки", "@актив & no date", "пусто"),
-    ("Ждёт ответа", "@ждёт & (overdue | no date)", "пусто"),
-    ("Inbox", "#Inbox", "0"),
-    ("Просрочено", "overdue", "пусто"),
-    ("В игре", "@актив & !no date", "—"),
-)
 
 
 @dataclass
@@ -143,72 +138,6 @@ def _колесо(path: Path) -> list[tuple[str, dict]]:
         return []
     ряды = [(str(k), v) for k, v in данные.items() if isinstance(v, dict)]
     return sorted(ряды)[-6:]  # последние полгода: линия видна, страница не пухнет
-
-
-# ── чтение Todoist ───────────────────────────────────────────────────────────
-
-async def _счёт(client: TodoistClient, query: str) -> list[dict]:
-    try:
-        data = await client.get("/tasks/filter", params={"query": query, "limit": 100})
-    except TodoistError as err:
-        log.warning("прибор «%s» не снялся: %s", query, err)
-        return []
-    return data.get("results", []) if isinstance(data, dict) else (data or [])
-
-
-async def _цели(client: TodoistClient) -> list[dict]:
-    """Работа по каждой цели: сколько дел, сколько с датой, ближайший шаг.
-
-    **Работа по цели — это карточка ПЛЮС всё, что под ней.** Метка на подзадачи
-    не наследуется, а карточка-замысел по методологии без даты: сроки живут
-    у подзадач. Считать только помеченное — значит объявить спящей цель «Бали»
-    с тридцатью задачами и датами (проверено на живом аккаунте 31.07).
-
-    Помеченное вне карточки тоже считается: метка на то и заведена, чтобы
-    собирать работу по цели, где бы та ни лежала.
-
-    Норма машинная ровно поэтому: «у цели есть следующий шаг с датой» код
-    проверить может, а по тексту в описании — нет.
-    """
-    try:
-        все = await client.get_paginated("/tasks", params={"limit": 200}, cap=1000)
-    except TodoistError as err:
-        log.warning("задачи для целей не забрались: %s", err)
-        return []
-
-    дети: dict[str, list[dict]] = {}
-    for задача in все:
-        if задача.get("parent_id"):
-            дети.setdefault(задача["parent_id"], []).append(задача)
-
-    def потомки(корни: list[dict]) -> list[dict]:
-        собрано, очередь = [], list(корни)
-        while очередь:
-            узел = очередь.pop()
-            собрано.append(узел)
-            очередь.extend(дети.get(узел["id"], []))
-        return собрано
-
-    имена = sorted({
-        метка for задача in все for метка in (задача.get("labels") or [])
-        if метка.startswith("цель-")
-    })
-
-    цели = []
-    for имя in имена:
-        помеченные = [з for з in все if имя in (з.get("labels") or [])]
-        работа = {з["id"]: з for з in потомки(помеченные)}
-        сроки = sorted(
-            (з.get("due") or {}).get("date", "")[:10]
-            for з in работа.values() if (з.get("due") or {}).get("date")
-        )
-        цели.append({
-            "имя": имя.removeprefix("цель-"),
-            "всего": len(работа),
-            "с_датой": len(сроки),
-            "ближайший": сроки[0] if сроки else "",
-        })
-    return цели
 
 
 # ── чтение архива ────────────────────────────────────────────────────────────

@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS todoist_closed (
     completed_at TEXT NOT NULL,
     content      TEXT NOT NULL,
     project      TEXT NOT NULL DEFAULT '',
+    -- Поля профиля: без времени заведения не посчитать, сколько задача прожила,
+    -- а без меток — не сказать, чем отличается судьба короткой задачи от длинной.
+    added_at     TEXT NOT NULL DEFAULT '',
+    labels       TEXT NOT NULL DEFAULT '',
+    priority     INTEGER,
+    due          TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, completed_at)
 );
 
@@ -92,10 +98,40 @@ def _today() -> date:
     return date.today() if not os.environ.get("COACH_TZ") else _tz_today()
 
 
+def _month_after(day: date) -> date:
+    """Тот же день следующего месяца; 31-е там, где его нет, съезжает на конец."""
+    год, месяц = (day.year + 1, 1) if day.month == 12 else (day.year, day.month + 1)
+    из_месяца = [31, 29 if год % 4 == 0 and (год % 100 or год % 400 == 0) else 28,
+                 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][месяц - 1]
+    return date(год, месяц, min(day.day, из_месяца))
+
+
 def _tz_today() -> date:
     from datetime import datetime
 
     return datetime.now(ZoneInfo(os.environ["COACH_TZ"])).date()
+
+
+def _closed_row(task: dict, project: str = "") -> dict:
+    """Строка закрытой задачи. Одна форма на ночной снимок и на добор истории."""
+    return {
+        "task_id": task.get("id", ""),
+        "completed_at": task.get("completed_at", ""),
+        "content": task.get("content", ""),
+        "project": project,
+        "added_at": task.get("added_at") or task.get("created_at") or "",
+        "labels": ",".join(task.get("labels") or []),
+        "priority": task.get("priority"),
+        "due": ((task.get("due") or {}).get("date") or "")[:10],
+    }
+
+
+CLOSED_INSERT = (
+    "INSERT OR REPLACE INTO todoist_closed(task_id, completed_at, content, project,"
+    " added_at, labels, priority, due)"
+    " VALUES(:task_id, :completed_at, :content, :project, :added_at, :labels,"
+    " :priority, :due)"
+)
 
 
 class TodoistSnapshot:
@@ -107,6 +143,18 @@ class TodoistSnapshot:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.executescript(SCHEMA)
+            self._migrate(db)
+
+    @staticmethod
+    def _migrate(db: sqlite3.Connection) -> None:
+        """Дотянуть живую базу до свежей схемы. Только добавляющие правки."""
+        было = {row[1] for row in db.execute("PRAGMA table_info(todoist_closed)")}
+        for колонка, тип in (("added_at", "TEXT NOT NULL DEFAULT ''"),
+                             ("labels", "TEXT NOT NULL DEFAULT ''"),
+                             ("priority", "INTEGER"),
+                             ("due", "TEXT NOT NULL DEFAULT ''")):
+            if колонка not in было:
+                db.execute(f"ALTER TABLE todoist_closed ADD COLUMN {колонка} {тип}")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path, timeout=30)
@@ -151,6 +199,10 @@ class TodoistSnapshot:
             yesterday = (_today() - timedelta(days=1)).isoformat()
             today = _today().isoformat()
             try:
+                # Список закрытых лежит под ключом `items`, а не `results`.
+                # Раньше клиент знал только вторую форму и молча собирал пустоту:
+                # 0 строк в `todoist_closed` при 1826 закрытых по счётчику Todoist
+                # (найдено прогоном 01.08). Теперь обе формы знает сам клиент.
                 closed = await client.get_paginated(
                     "/tasks/completed/by_completion_date",
                     params={"since": f"{yesterday}T00:00:00", "until": f"{today}T00:00:00",
@@ -180,12 +232,7 @@ class TodoistSnapshot:
                 "comments": json.dumps(comments.get(task["id"], []), ensure_ascii=False),
             })
 
-        done = [{
-            "task_id": t.get("id", ""),
-            "completed_at": t.get("completed_at", ""),
-            "content": t.get("content", ""),
-            "project": names.get(t.get("project_id"), ""),
-        } for t in closed]
+        done = [_closed_row(t, names.get(t.get("project_id"), "")) for t in closed]
         return rows, done
 
     # --- запись ---
@@ -255,11 +302,7 @@ class TodoistSnapshot:
                 " :parent_id, :labels, :priority, :due, :deadline, :duration, :added_at, :comments)",
                 [dict(r, day=day) for r in rows],
             )
-            db.executemany(
-                "INSERT OR REPLACE INTO todoist_closed(task_id, completed_at, content, project)"
-                " VALUES(:task_id, :completed_at, :content, :project)",
-                closed,
-            )
+            db.executemany(CLOSED_INSERT, closed)
             db.execute("DELETE FROM todoist_diff WHERE day = ?", (day,))
             db.executemany(
                 "INSERT OR REPLACE INTO todoist_diff(day, kind, task_id, content, detail)"
@@ -267,6 +310,53 @@ class TodoistSnapshot:
                 changes,
             )
         return {"задач": len(rows), "закрыто": len(closed), "изменений": len(changes)}
+
+    # --- разовый добор истории ---
+
+    async def backfill_closed(self, since: date, until: date | None = None) -> int:
+        """Долить закрытые задачи задним числом. Возвращает, сколько строк легло.
+
+        Зачем. Ночной снимок копит закрытые с той ночи, когда его починили,
+        а профиль поведения (часы работы, срок жизни задачи) может считаться
+        сразу: Todoist отдаёт историю **примерно за три месяца** — проверено
+        01.08, с 01.05 отдаёт 57 задач, с 01.02 отвечает 400 «completion date
+        range must be…». Значит профиль стартует с маем–июлем, а не с нуля.
+
+        Просим помесячно, а не одним куском: граница окна у Todoist своя
+        и точного числа дней он не называет — месяц заведомо внутри неё,
+        и отказ на дальнем месяце не уносит с собой ближние.
+        """
+        until = until or _today()
+        собрано: list[dict] = []
+        async with TodoistClient(self.token) as client:
+            начало = since
+            while начало < until:
+                конец = min(_month_after(начало), until)
+                try:
+                    куски = await client.get_paginated(
+                        "/tasks/completed/by_completion_date",
+                        params={"since": f"{начало.isoformat()}T00:00:00",
+                                "until": f"{конец.isoformat()}T00:00:00", "limit": 200},
+                        cap=2000,
+                    )
+                except TodoistError as err:
+                    log.warning("история с %s по %s не забралась: %s", начало, конец, err)
+                    куски = []
+                собрано.extend(куски)
+                начало = конец
+
+        # Имён проектов у исторических задач не спрашиваем: часть проектов уже
+        # переименована или удалена, и подставленное сегодня имя соврало бы про тот день.
+        rows = [_closed_row(t) for t in собрано if t.get("completed_at")]
+
+        def _write() -> int:
+            with self._connect() as db:
+                db.executemany(CLOSED_INSERT, rows)
+                return db.execute("SELECT COUNT(*) FROM todoist_closed").fetchone()[0]
+
+        всего = await asyncio.to_thread(_write)
+        log.info("добор истории с %s: пришло %d, в таблице стало %d", since, len(rows), всего)
+        return всего
 
     async def run(self, day: date | None = None) -> dict[str, int]:
         """Снять снимок за день. Todoist недоступен — ноль и жалоба в лог.

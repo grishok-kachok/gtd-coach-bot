@@ -172,3 +172,66 @@ def test_недоступный_todoist_не_роняет_ночной_прог�
 
     monkeypatch.setattr(снимок, "TodoistClient", Падает())
     assert asyncio.run(хранилище.run(date(2026, 8, 3)))["задач"] == 0
+
+
+# ── починка 01.08: закрытые лежат под ключом `items` ─────────────────────────
+
+def test_закрытые_копят_поля_профиля(лаборатория):
+    """Без времени заведения и меток профиль не посчитать: срок жизни задачи
+    и разница между короткой и длинной берутся отсюда."""
+    хранилище, todoist = лаборатория
+    todoist.closed = [{
+        "id": "t1", "completed_at": "2026-08-02T09:00:00Z", "content": "Оплатить",
+        "project_id": "p1", "added_at": "2026-07-28T12:00:00Z",
+        "labels": ["актив", "⏱️S"], "priority": 3, "due": {"date": "2026-08-02"},
+    }]
+    asyncio.run(хранилище.run(date(2026, 8, 2)))
+
+    строка = строки(хранилище, "todoist_closed")[0]
+    assert строка["added_at"] == "2026-07-28T12:00:00Z"
+    assert строка["labels"] == "актив,⏱️S"
+    assert строка["priority"] == 3 and строка["due"] == "2026-08-02"
+
+
+def test_добор_истории_наливает_прошлое(лаборатория):
+    """Разовая операция: история закрытий у Todoist есть примерно за три месяца,
+    и профиль стартует с ней, а не с нуля."""
+    хранилище, todoist = лаборатория
+    todoist.closed = [
+        {"id": f"t{i}", "completed_at": f"2026-06-0{i+1}T09:00:00Z",
+         "content": f"старое {i}", "added_at": "2026-05-01T09:00:00Z"}
+        for i in range(3)
+    ]
+    всего = asyncio.run(хранилище.backfill_closed(date(2026, 5, 1), date(2026, 8, 1)))
+    assert всего == 3
+    assert {с["content"] for с in строки(хранилище, "todoist_closed")} == {
+        "старое 0", "старое 1", "старое 2"}
+
+
+def test_добор_можно_повторять_не_двоя(лаборатория):
+    хранилище, todoist = лаборатория
+    todoist.closed = [{"id": "t1", "completed_at": "2026-06-01T09:00:00Z",
+                       "content": "старое", "added_at": "2026-05-01T09:00:00Z"}]
+    asyncio.run(хранилище.backfill_closed(date(2026, 5, 1), date(2026, 8, 1)))
+    assert asyncio.run(хранилище.backfill_closed(date(2026, 5, 1), date(2026, 8, 1))) == 1
+
+
+def test_живая_база_дотягивается_до_свежей_схемы(tmp_path, monkeypatch):
+    """На сервере таблица уже есть и колонок профиля в ней нет. Миграция
+    добавляет их, не теряя накопленного."""
+    import sqlite3 as sq
+    путь = tmp_path / "coach.db"
+    with sq.connect(путь) as db:
+        db.execute("CREATE TABLE todoist_closed (task_id TEXT NOT NULL,"
+                   " completed_at TEXT NOT NULL, content TEXT NOT NULL,"
+                   " project TEXT NOT NULL DEFAULT '', PRIMARY KEY (task_id, completed_at))")
+        db.execute("INSERT INTO todoist_closed VALUES('t1','2026-07-01','Было','Рабочее')")
+
+    monkeypatch.setattr(снимок, "TodoistClient", ПоддельныйTodoist())
+    снимок.TodoistSnapshot(путь, "токен")
+
+    with sq.connect(путь) as db:
+        колонки = {r[1] for r in db.execute("PRAGMA table_info(todoist_closed)")}
+        осталось = db.execute("SELECT content FROM todoist_closed").fetchall()
+    assert {"added_at", "labels", "priority", "due"} <= колонки
+    assert осталось == [("Было",)]
