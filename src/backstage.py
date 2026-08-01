@@ -27,6 +27,9 @@ from dataclasses import dataclass
 
 from todoist_mcp.client import TodoistClient, TodoistError
 
+from . import comment_state
+from .comment_state import МАРКЕР
+
 log = logging.getLogger(__name__)
 
 # Куда кладём. Это дела про самого коуча и его хозяйство, а по правилу от 24.07
@@ -137,9 +140,16 @@ async def raise_task(token: str, kind: str, note: str) -> str:
         async with TodoistClient(token) as client:
             standing = await _open_task(client, finding.title)
             if standing:
-                await client.post(
-                    "/comments", json={"task_id": standing["id"], "content": note}
+                # Маркер и запись в реестр — не украшение: канал комментариев
+                # опрашивает Todoist и увидит эту запись как новый комментарий.
+                # Свой комментарий приходит с тем же posted_uid, что хозяйский
+                # (бот работает токеном Василия), поэтому по автору его
+                # не отличить — см. comments.py.
+                комментарий = await client.post(
+                    "/comments",
+                    json={"task_id": standing["id"], "content": f"{МАРКЕР} {note}"},
                 )
+                comment_state.запомнить_свой(str((комментарий or {}).get("id") or ""))
                 log.info("фоновая находка «%s»: задача уже стоит, дописал комментарий", kind)
                 return "дополнена"
 

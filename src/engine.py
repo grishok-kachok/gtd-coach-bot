@@ -60,6 +60,7 @@ class CoachEngine:
         calendar: dict | None = None,
         extra_dirs: list[Path] | None = None,
         dashboard: dict | None = None,
+        undo=None,
     ) -> None:
         self.brain_dir = brain_dir
         self.sessions = session_storage
@@ -85,6 +86,9 @@ class CoachEngine:
         self.wishes_server = build_wishes_server(brain_dir, todoist_token)
         # Дашборд — файл в телеграм. Отправка обязана случаться, значит инструмент.
         self.dashboard_server = build_dashboard_server(**dashboard) if dashboard else None
+        # Откат того, что коуч сделал по комментарию в Todoist. Кнопка, а не
+        # команда: «откати последнее» должно работать словами, как всё остальное.
+        self.undo_server = undo
         # Календарь подключаем только когда заданы креды — без них бот работает как прежде.
         self.calendar_server = (
             build_calendar_server(**calendar, switches=self._switches["calendar"])
@@ -103,7 +107,7 @@ class CoachEngine:
 
         total = 0
         for server in (self.todoist_server, self.calendar_server,
-                       self.wishes_server, self.dashboard_server):
+                       self.wishes_server, self.dashboard_server, self.undo_server):
             if not server:
                 continue
             try:
@@ -169,6 +173,9 @@ class CoachEngine:
         if self.dashboard_server is not None:
             mcp_servers["dashboard"] = self.dashboard_server
             allowed = allowed + ["mcp__dashboard"]
+        if self.undo_server is not None:
+            mcp_servers["undo"] = self.undo_server
+            allowed = allowed + ["mcp__undo"]
         return ClaudeAgentOptions(
             system_prompt=self.system_prompt,
             cwd=str(self.brain_dir),

@@ -52,6 +52,11 @@ def is_retryable(error: BaseException) -> bool:
     """Стоит ли повторять — то есть «связь моргнула», а не «запрос неправильный»."""
     if isinstance(error, HOPELESS):
         return False
+    # Клиент Todoist заворачивает httpx-ошибку в свой тип и сам говорит,
+    # чинится ли она повтором. Спрашиваем его, а не разбираем текст: текст
+    # меняется, а вопрос «связь моргнула или запрос кривой» — нет.
+    if getattr(error, "retryable", False):
+        return True
     if isinstance(error, TelegramRetryAfter):  # Telegram сам просит подождать
         return True
     if isinstance(error, TelegramNetworkError):  # таймаут/обрыв по пути к Telegram

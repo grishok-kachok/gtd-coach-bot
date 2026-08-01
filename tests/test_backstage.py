@@ -66,13 +66,21 @@ def test_первая_находка_заводит_задачу_с_датой(t
     assert "промахов 3" in карточка["description"]
 
 
-def test_вторая_находка_не_плодит_задачу_а_комментирует(todoist):
+def test_вторая_находка_не_плодит_задачу_а_комментирует(todoist, tmp_path, monkeypatch):
+    # Реестр своих комментариев с этапа 10 живёт в архивной базе — в тесте
+    # уводим её в tmp, иначе код полезет в /archive контейнера.
+    monkeypatch.setenv("ARCHIVE_DB", str(tmp_path / "coach.db"))
     asyncio.run(backstage.raise_task("токен", "предложения", "первая ночь"))
     исход = asyncio.run(backstage.raise_task("токен", "предложения", "вторая ночь"))
 
     assert исход == "дополнена"
     assert len(todoist.created) == 1, "вторая задача на ту же копилку — засорение"
-    assert todoist.comments == [{"task_id": "t1", "content": "вторая ночь"}]
+    # Маркер обязателен: этот комментарий пишет бот, и через три минуты его
+    # увидит опрос канала. По автору своё от хозяйского не отличается —
+    # бот работает токеном Василия.
+    assert todoist.comments == [{"task_id": "t1", "content": f"{backstage.МАРКЕР} вторая ночь"}]
+    from src.comment_state import Журнал
+    assert Журнал(tmp_path / "coach.db").свой("c1") is True
 
 
 def test_похожее_имя_не_считается_той_же_задачей(todoist):

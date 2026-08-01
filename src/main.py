@@ -26,6 +26,7 @@ from . import agenda
 from .archive import Archive
 from .backstage import raise_task
 from .brain import Brain
+from .comments import Канал, build_undo_server
 from . import detectors
 from .digest import Digester
 from .engine import CoachEngine
@@ -84,6 +85,18 @@ class CoachBot:
 
         self.brain = Brain(self.brain_dir)
         self.todoist_token = env("TODOIST_API_TOKEN", required=True)
+        # Заполняется в run(): через это приложение уходят файлы и жалобы канала.
+        self.app: Application | None = None
+        self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
+        # Вторая дверь к коучу — комментарии в карточках задач. Заводится до
+        # движка: движку нужна её кнопка отката.
+        self.comments = Канал(
+            token=self.todoist_token,
+            db_path=Path(env("ARCHIVE_DB", "/archive/coach.db")),
+            archive=self.archive,
+            model=env("COACH_MODEL", "claude-fable-5"),
+            сказать=self._сказать_владельцу,
+        )
         self.engine = CoachEngine(
             brain_dir=self.brain_dir,
             session_storage=SessionStorage(state_dir / "session_id"),
@@ -99,12 +112,10 @@ class CoachBot:
                 "todoist_token": self.todoist_token,
                 "send": self._send_document,
             },
+            undo=build_undo_server(self.comments),
         )
-        # Заполняется в run(): инструмент дашборда шлёт файл через это приложение.
-        self.app: Application | None = None
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         self.voice = self._voice_recognizer()
-        self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
         # Ритмы живут в мозге, а не в .env: их меняет Василий фразой в телеграме.
         self.rhythms, problems = read(self.brain_dir)
         if problems:
@@ -274,6 +285,43 @@ class CoachBot:
             log.exception("не смог отправить файл %s", path)
             return False
         return True
+
+    async def _сказать_владельцу(self, текст: str) -> None:
+        """Сказать что-то в телеграм не в ответ на реплику, а от себя.
+
+        Нужна фоновым сторожам: канал комментариев так жалуется на потолок.
+        Приложение поднимается позже конструктора, поэтому проверяем.
+        """
+        if self.app is None:
+            log.error("некому сказать: приложение ещё не поднято (%s)", текст[:60])
+            return
+        try:
+            await self.app.bot.send_message(chat_id=self.owner_id, text=текст)
+        except Exception:
+            log.exception("не смог написать владельцу")
+
+    async def watch_comments(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Опрос комментариев в Todoist — вторая дверь к коучу.
+
+        Пустой цикл стоит 215 байт и один HTTP-запрос: модель просыпается
+        только на обращение по имени. Молчим в логах о пустоте — 480 строк
+        «ничего нет» в сутки прячут настоящую поломку.
+        """
+        # Модель канала берём из настроек мозга, как и модель разговора:
+        # «переключись на Opus» обязано менять и работника комментариев.
+        values, beefs = coach_settings.read(self.brain_dir)
+        if values and not beefs:
+            self.comments.model = str(values["модель_разговора"])
+        try:
+            итог = await self.comments.шаг()
+        except Exception:
+            log.exception("канал комментариев сорвался")
+            return
+        if итог["обращений"] or итог["новых"]:
+            log.info(
+                "канал комментариев: новых %d, обращений %d, разобрано %d",
+                итог["новых"], итог["обращений"], итог["сделано"],
+            )
 
     async def _keep_typing(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
@@ -812,6 +860,14 @@ class CoachBot:
         # Сторож на случай, когда файл ритмов приехал со стороны — например, git pull
         # притащил правку с другой машины. Разговор такую правку не заметит.
         queue.run_repeating(self.watch_rhythms, interval=3600, first=3600, name="сторож ритмов")
+        # Вторая дверь: комментарии в карточках задач. Три минуты — компромисс
+        # между «ответил, пока не убрал телефон» и ничем: пустой цикл стоит
+        # 215 байт и ноль токенов, платить за частоту тут нечем.
+        queue.run_repeating(
+            self.watch_comments,
+            interval=int(env("COMMENTS_POLL_SECONDS", "180")),
+            first=30, name="комментарии",
+        )
 
         log.info("коуч поднялся: %s, владелец %s", describe(self.rhythms), self.owner_id)
         # Вебхуки в РФ не годятся — Telegram их не достучится, работаем поллингом.
