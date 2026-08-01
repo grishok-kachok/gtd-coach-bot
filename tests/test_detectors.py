@@ -213,3 +213,28 @@ def test_жалоба_видна_даже_когда_отклонений_нет
     свод = detectors.Свод()
     свод.жалобы = ["календарь не ответил"]
     assert "Не посмотрел: календарь не ответил" in свод.текст()
+
+
+# ── календарь ────────────────────────────────────────────────────────────────
+
+def test_свободные_часы_считаются_из_окон(monkeypatch):
+    """Часы, а не строка: разбирать готовый текст значило бы завести второй
+    дом у одной арифметики."""
+    import datetime as dt
+    from gcal_mcp import core as gcal_core
+
+    зона = dt.timezone(dt.timedelta(hours=3))
+
+    async def окна(client, **kw):
+        день = dt.datetime(2026, 8, 4, tzinfo=зона)
+        return "неделя", {"2026-08-04": [(день.replace(hour=9), день.replace(hour=11))]}
+
+    monkeypatch.setattr(gcal_core, "free_windows", окна)
+    часы, жалоба = __import__("asyncio").run(detectors.свободные_часы(
+        {"client_id": "a", "client_secret": "b", "refresh_token": "c"}))
+    assert часы == {"2026-08-04": 2.0} and жалоба == ""
+
+
+def test_календарь_не_подключён_говорим_вслух():
+    часы, жалоба = __import__("asyncio").run(detectors.свободные_часы(None))
+    assert часы == {} and "не подключён" in жалоба

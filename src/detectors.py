@@ -405,17 +405,15 @@ async def свободные_часы(calendar: dict | None, дней: int = 7) 
     except ImportError as err:  # пакета нет — не повод ронять обход
         return {}, f"календарь недоступен ({err})"
 
-    client = CalendarClient(**calendar)
     try:
-        _, окна = await free_windows(
-            client, date_from=_сегодня().isoformat(),
-            date_to=(_сегодня() + timedelta(days=дней)).isoformat(), min_minutes=30,
-        )
+        async with CalendarClient(**calendar) as client:
+            _, окна = await free_windows(
+                client, date_from=_сегодня().isoformat(),
+                date_to=(_сегодня() + timedelta(days=дней)).isoformat(), min_minutes=30,
+            )
     except (CalendarError, OSError) as err:
         log.warning("свободные окна не забрались: %s", err)
         return {}, "календарь не ответил — перегруз считаю от рабочего дня"
-    finally:
-        await client.aclose()
 
     часы = {
         день: round(sum((к - н).total_seconds() for н, к in окна) / 3600, 1)
