@@ -157,7 +157,7 @@ class CoachBot:
         )
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         self.voice = self._voice_recognizer()
-        # Ритмы живут в мозге, а не в .env: их меняет Василий фразой в телеграме.
+        # Ритмы живут в мозге, а не в .env: их меняет пользователь фразой в телеграме.
         self.rhythms, problems = read(self.brain_dir)
         if problems:
             log.error("ритмы в мозге сломаны, беру умолчания: %s", "; ".join(problems))
@@ -229,9 +229,9 @@ class CoachBot:
     def _calendar_config() -> dict | None:
         """Google-календарь подключаем, только если заданы все три секрета.
 
-        Часовой пояс настраиваемый: с сентября владелец переезжает на Бали —
-        поменяется одна переменная COACH_TZ. Выход к Google — через тот же
-        Xray-мост, что у Whisper (Google в РФ блокируется)."""
+        Часовой пояс — переменная COACH_TZ: переехал человек в другую страну,
+        поменялась одна строка, код не трогаем. Выход к Google при нужде идёт
+        через прокси из HTTPS_PROXY — там, где Google блокируется."""
         client_id = env("GOOGLE_CLIENT_ID")
         client_secret = env("GOOGLE_CLIENT_SECRET")
         refresh_token = env("GOOGLE_REFRESH_TOKEN")
@@ -276,7 +276,7 @@ class CoachBot:
             # закладок посреди чужого ответа увело бы разговор не туда.
             мостик = await self._переключить_обряд(text, context)
             await self.archive.add_message(
-                "vasiliy", channel, archived_as or text, self.engine.sessions.load()
+                "user", channel, archived_as or text, self.engine.sessions.load()
             )
             typing = asyncio.create_task(self._keep_typing(chat_id, context))
             mode = self.engine.режим()
@@ -305,7 +305,7 @@ class CoachBot:
                 typing.cancel()
             await self.archive.add_message("coach", channel, answer, self.engine.sessions.load())
 
-        # Коуч мог только что поменять ритмы по просьбе Василия — заметить это надо
+        # Коуч мог только что поменять ритмы по просьбе пользователя — заметить это надо
         # сразу, а не через час: «пиши мне три раза в день» должно работать как фраза.
         await self._reread_rhythms(context, loud=True)
         # И режим тоже: «переключись в полный» — такая же фраза, как «пиши три
@@ -376,7 +376,7 @@ class CoachBot:
         ]
         if строки:
             беседа = "\n".join(
-                f"{'Василий' if роль == 'vasiliy' else 'ты'}: {текст.strip()[:400]}"
+                f"{'он' if роль == 'user' else 'ты'}: {текст.strip()[:400]}"
                 for роль, _, _, текст in строки
             )
             куски.append(
@@ -413,13 +413,13 @@ class CoachBot:
             "<обряд>\nМы отлучались на стратсессию и вернулись к этому разговору. "
             "Что там решили — уже записано в память и в Todoist, пересказывать "
             "не надо. Просто продолжай с того места, где остановились: коротко "
-            "подтверди возвращение и жди, что скажет Василий.\n</обряд>\n\n"
+            "подтверди возвращение и жди, что скажет пользователь.\n</обряд>\n\n"
         )
 
     async def _заметить_режим(self, context: ContextTypes.DEFAULT_TYPE, было) -> None:
         """Сказать вслух, если режим переключился.
 
-        Переключает его сам коуч, правя `настройки.md` по просьбе Василия, —
+        Переключает его сам коуч, правя `настройки.md` по просьбе пользователя, —
         то есть машинная правка, и по правилу проекта она обязана быть видимой.
         Молча сменившийся режим означал бы, что человек не знает, с какой
         головой он сейчас разговаривает.
@@ -562,7 +562,9 @@ class CoachBot:
                     on_retry=warn,
                 )
             )
-            text = await self.voice.transcribe(audio, on_retry=warn, on_switch=switched)
+            словарь = list((self.engine._settings() or {}).get("словарь_голоса") or [])
+            text = await self.voice.transcribe(
+                audio, on_retry=warn, on_switch=switched, словарь=словарь)
         except Exception as error:
             log.exception("расшифровка не удалась")
             await context.bot.send_message(chat_id=chat_id, text=f"Не разобрал голос: {error}")
@@ -657,7 +659,7 @@ class CoachBot:
 
         caption = (message.caption or "").strip()
         prompt = (
-            f"Василий прислал картинку. Открой её инструментом Read по пути {path} — "
+            f"пользователь прислал картинку. Открой её инструментом Read по пути {path} — "
             "это изображение, ты его увидишь.\n"
             + (f"Подписал так: {caption}\n" if caption else "")
             + "Ответь по тому, что на картинке, и по подписи, если она есть."
@@ -785,14 +787,14 @@ class CoachBot:
         )
 
     async def follow_up(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Василий не отозвался на чек-ин — попробовать ещё раз, иначе отступить.
+        """Пользователь не отозвался на чек-ин — попробовать ещё раз, иначе отступить.
 
         Проверяем факт по архиву, а не по флагу в памяти: бот мог быть перезапущен,
         а ответ мог прийти любым каналом.
         """
         sent_at, attempt = context.job.data
         if await asyncio.to_thread(self.archive.answered_since, sent_at):
-            log.info("дожим %s не нужен: Василий отозвался", attempt)
+            log.info("дожим %s не нужен: пользователь отозвался", attempt)
             return
         now = datetime.now(MOSCOW)
         if now.hour >= self.rhythms["тихий_час"] or now.hour < 8:
@@ -836,7 +838,7 @@ class CoachBot:
                         self.todoist_token, "предложения",
                         f"Ночь {yesterday.isoformat()}: фактов {found['факты']}, "
                         f"выводов {found['выводы']}. Выводы записываются только "
-                        f"после подтверждения Василием.",
+                        f"после подтверждения пользователем.",
                     )
                 if found.get("промахи"):
                     await raise_task(
@@ -1062,7 +1064,7 @@ class CoachBot:
     async def _reread_rhythms(self, context: ContextTypes.DEFAULT_TYPE, loud: bool) -> None:
         """Перечитать файл ритмов и, если он изменился, перевесить будильники.
 
-        `loud` — говорить ли Василию. После его собственной реплики говорим: он
+        `loud` — говорить ли пользователю. После его собственной реплики говорим: он
         только что попросил поменять расписание и должен увидеть, что вышло.
         Из часового сторожа молчим про «всё по-прежнему», но про поломку — всегда.
         """

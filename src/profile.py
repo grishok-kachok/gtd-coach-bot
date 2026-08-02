@@ -278,7 +278,7 @@ def отклик_на_пинги(archive_db: Path, окно: int = 30,
                     сегодня: date | None = None) -> Показатель | None:
     """На какой чек-ин человек отзывается, а какой пропускает молча.
 
-    Пинг лежит в архиве строкой с ролью «vasiliy» и служебным каналом — это
+    Пинг лежит в архиве строкой с ролью «user» и служебным каналом — это
     текст задания коучу, а не слова человека (так устроен archive.py). Ответом
     считается ближайшая живая реплика: голосом или текстом.
     """
@@ -303,7 +303,7 @@ def отклик_на_пинги(archive_db: Path, окно: int = 30,
         когда = _местное(created_at) or None
         if когда is None:
             continue
-        if role == "vasiliy" and channel in ПИНГИ:
+        if role == "user" and channel in ПИНГИ:
             # Прошлый пинг остался без ответа — значит его пропустили молча.
             for канал, момент in list(ждут.items()):
                 if (когда - момент).total_seconds() > 6 * 3600:
@@ -311,7 +311,7 @@ def отклик_на_пинги(archive_db: Path, окно: int = 30,
                     ждут.pop(канал)
             ждут[channel] = когда
             всего[channel] += 1
-        elif role == "vasiliy" and channel not in ("nudge",):
+        elif role == "user" and channel not in ("nudge",):
             for канал, момент in list(ждут.items()):
                 задержки[канал].append((когда - момент).total_seconds() / 60)
                 ждут.pop(канал)

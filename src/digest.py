@@ -35,7 +35,7 @@ KIND = {"week": "недельная выжимка", "month": "месячная 
 # Выжимка — заметка мозга по стандарту Loreground, а не просто текстовый файл.
 # Заголовок писался руками при перестройке памяти в этапе 12, но пишет-то файлы
 # код: первая же новая выжимка вышла бы без заголовка, а валидатор считает такую
-# заметку битой. Тип — `source`: выжимка ничего не утверждает про Василия, она
+# заметку битой. Тип — `source`: выжимка ничего не утверждает про пользователя, она
 # фиксирует сказанное. Корень провенанса — день разговора, у укрупнений корни
 # те дни, из которых их собрали: пересказ своего корня не заводит.
 FRONTMATTER = """---
@@ -113,7 +113,7 @@ class Digester:
                 )
             text = text.strip()
             if text:
-                who = "Василий" if role == "user" else "Коуч"
+                who = "пользователь" if role == "user" else "Коуч"
                 lines.append(f"{who}: {text}")
         return "\n\n".join(lines)
 
@@ -121,7 +121,7 @@ class Digester:
         """Сырьё разговора за день — им кормится и выжимка, и ночная проверка памяти."""
         lines = []
         for role, channel, source, text in self.archive.messages_of_day(day.isoformat()):
-            who = "Василий" if role == "vasiliy" else "Коуч"
+            who = "Человек" if role == "user" else "Коуч"
             mark = " (голосом)" if channel == "voice" else ""
             if source == "laptop":
                 mark = " (с ноутбука)"
@@ -149,7 +149,7 @@ class Digester:
         head = FRONTMATTER.format(
             title=day.isoformat(),
             created=day.isoformat(),
-            author="Василий (со слов) + агент-коуч (запись)",
+            author="пользователь (со слов) + агент-коуч (запись)",
             ref=f"разговор {day.isoformat()}, записан агентом в мозг",
             roots=f"разговор-{day.isoformat()}",
         )

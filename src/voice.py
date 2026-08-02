@@ -36,12 +36,28 @@ OPENAI_STT_MODEL = "whisper-1"
 PRIMARY_ATTEMPTS = 1
 FALLBACK_ATTEMPTS = 9
 
-# Имена и слова, которые Whisper регулярно калечит в речи Василия.
-HINT = (
-    "Разговор о делах и планах. Возможные слова: Todoist, Клод, Claude, "
-    "АкадемИИ, Бали, Таня, Татьяна, поток, эфир, домашки, рилс, карусель, "
-    "Инстаграм, ИП, эквайринг, дедлайн."
+# Подсказка распознавателю: слова, которые он регулярно калечит.
+#
+# Общая часть — здесь, личная (имена, города, названия проектов) — в мозге,
+# строка `словарь_голоса` в настройках. Иначе список неизбежно зарастает
+# личными именами одного человека и становится вредным для всех остальных:
+# «Таня» в подсказке заставляет распознаватель слышать Таню там, где её нет.
+БАЗОВЫЙ_СЛОВАРЬ = (
+    "Todoist, Клод, Claude, дедлайн, задача, проект, созвон, эфир"
 )
+ОБЩЕЕ = "Разговор о делах и планах. Возможные слова: "
+
+
+def подсказка(словарь: list[str] | None = None) -> str:
+    """Что подсказать распознавателю: общие слова плюс личные из настроек."""
+    слова = [БАЗОВЫЙ_СЛОВАРЬ]
+    свои = ", ".join(s.strip() for s in (словарь or []) if str(s).strip())
+    if свои:
+        слова.append(свои)
+    return ОБЩЕЕ + ", ".join(слова) + "."
+
+
+HINT = подсказка()
 
 
 class Service:
@@ -71,6 +87,7 @@ class VoiceRecognizer:
         filename: str = "voice.ogg",
         on_retry: Callable[[int, BaseException], Awaitable[None]] | None = None,
         on_switch: Callable[[str, str], Awaitable[None]] | None = None,
+        словарь: list[str] | None = None,
     ) -> str:
         """Расшифровать голосовое: сначала основным сервисом, потом запасным.
 
@@ -97,7 +114,8 @@ class VoiceRecognizer:
             last = index == len(plan) - 1
             try:
                 return await retry_network(
-                    lambda service=service: self._ask_service(service, audio, filename),
+                    lambda service=service: self._ask_service(
+                        service, audio, filename, подсказка(словарь)),
                     what=f"расшифровка через {service.name}",
                     attempts=attempts,
                     on_retry=on_retry,
@@ -119,14 +137,15 @@ class VoiceRecognizer:
                         log.exception("не удалось сообщить о переключении сервиса")
         raise AssertionError("недостижимо")  # цикл выходит только через return или raise
 
-    async def _ask_service(self, service: Service, audio: bytes, filename: str) -> str:
+    async def _ask_service(self, service: Service, audio: bytes, filename: str,
+                           hint: str = HINT) -> str:
         """Одна попытка: отправить аудио сервису распознавания и забрать текст."""
         async with httpx.AsyncClient(timeout=120, proxy=self.proxy) as http:
             response = await http.post(
                 service.url,
                 headers={"Authorization": f"Bearer {service.api_key}"},
                 files={"file": (filename, audio, "audio/ogg")},
-                data={"model": service.model, "language": "ru", "prompt": HINT},
+                data={"model": service.model, "language": "ru", "prompt": hint},
             )
             response.raise_for_status()
             return (response.json().get("text") or "").strip()

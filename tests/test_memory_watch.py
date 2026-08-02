@@ -15,7 +15,7 @@ import pytest
 from src.memory_watch import MISSES, PROPOSALS, MemoryWatch
 
 ANSWER = """ФАКТЫ:
-- Вылет на Бали 17 сентября, билеты куплены — сказал сам
+- Вылет на Лиссабон 17 сентября, билеты куплены — сказал сам
 - Эфиры по вторникам в 10:30
 
 ВЫВОДЫ:
@@ -58,10 +58,10 @@ def test_sections_are_split_by_kind(watch):
 
     proposals = (watch.journal / PROPOSALS).read_text(encoding="utf-8")
     assert "type: source" in proposals, "предложение — не знание, оно ничего не утверждает"
-    assert "Со слов Василия" in proposals and "17 сентября" in proposals
+    assert "Со слов пользователя" in proposals and "17 сентября" in proposals
     assert "Выводы коуча — сначала спросить" in proposals
     assert "задачи без первого шага" in proposals
-    # Вывод не должен затесаться в раздел фактов — иначе бот запишет за Василия то,
+    # Вывод не должен затесаться в раздел фактов — иначе бот запишет за пользователя то,
     # чего тот не говорил.
     assert proposals.index("17 сентября") < proposals.index("Выводы коуча")
 

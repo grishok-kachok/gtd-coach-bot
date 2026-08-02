@@ -3,7 +3,7 @@
 Выжимки в журнале — это то, что коуч читает каждый день. Архив — то, что
 можно перелопатить, если выжимка что-то упустила или понадобилось поднять
 старое дословно. SQLite выбран не от бедности: файл лежит в docker-томе,
-а на Bronto тома со SQLite уже бэкапятся тем же скриптом, что и Postgres.
+а тома со SQLite попадают в обычный бэкап сервера вместе со всем остальным.
 """
 
 from __future__ import annotations
@@ -44,10 +44,10 @@ CREATE TABLE IF NOT EXISTS messages (
     day         TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     session_id  TEXT,
-    role        TEXT NOT NULL,          -- vasiliy | coach
+    role        TEXT NOT NULL,          -- user | coach
     channel     TEXT NOT NULL,          -- voice | text | morning | midday | evening | nudge
     text        TEXT NOT NULL,
-    source      TEXT NOT NULL DEFAULT 'telegram',  -- telegram | laptop (ноутбук Василия)
+    source      TEXT NOT NULL DEFAULT 'telegram',  -- telegram | laptop (сессия на компьютере)
     uuid        TEXT                    -- сквозной id из Claude Code, защита от дублей при импорте
 );
 CREATE INDEX IF NOT EXISTS messages_day ON messages(day);
@@ -80,6 +80,11 @@ class Archive:
         if "uuid" not in cols:
             db.execute("ALTER TABLE messages ADD COLUMN uuid TEXT")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_uuid ON messages(uuid)")
+        # Роль человека звалась именем владельца до 02.08.2026. Переименование —
+        # операция с данными, а не правка текста: в живом архиве под старым именем
+        # лежат сотни строк, и запросы кода ищут по точному значению. Правка
+        # идемпотентна: второй прогон найдёт ноль строк и ничего не сделает.
+        db.execute("UPDATE messages SET role='user' WHERE role='vasiliy'")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=30)
@@ -142,17 +147,17 @@ class Archive:
         return [(row[0], row[1], row[2], row[3]) for row in rows]
 
     def answered_since(self, moment: str) -> bool:
-        """Отозвался ли Василий после указанного момента (ISO-время с зоной).
+        """Отозвался ли человек после указанного момента (ISO-время с зоной).
 
-        Тексты крон-пингов лежат в архиве с ролью «vasiliy» — это инструкция коучу,
-        а не слова Василия, поэтому служебные каналы из выборки исключаем. Реплика
-        с ноутбука тоже считается ответом: если человек вживую работает в другом
+        Тексты крон-пингов лежат в архиве с ролью «user» — это инструкция коучу,
+        а не слова человека, поэтому служебные каналы из выборки исключаем. Реплика
+        с компьютера тоже считается ответом: если человек вживую работает в другом
         окне, дёргать его «приём-приём» в телеграме — верный способ приучить
         пролистывать наши сообщения.
         """
         with self._connect() as db:
             row = db.execute(
-                "SELECT 1 FROM messages WHERE role='vasiliy' AND created_at>? "
+                "SELECT 1 FROM messages WHERE role='user' AND created_at>? "
                 "AND channel NOT IN ('morning','midday','evening','nudge') LIMIT 1",
                 (moment,),
             ).fetchone()

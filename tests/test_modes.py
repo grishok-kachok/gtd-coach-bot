@@ -208,9 +208,9 @@ def test_недостающие_части_перечисляются(tmp_path):
 
 def test_файлы_стратегии_читаются(tmp_path):
     (tmp_path / "память" / "состояние").mkdir(parents=True)
-    (tmp_path / "память" / "состояние" / "горизонты.md").write_text("Год: Бали", encoding="utf-8")
+    (tmp_path / "память" / "состояние" / "горизонты.md").write_text("Год: Лиссабон", encoding="utf-8")
     текст = modes.файлы_стратегии(tmp_path, ("горизонты",))
-    assert "Год: Бали" in текст and "Горизонты" in текст
+    assert "Год: Лиссабон" in текст and "Горизонты" in текст
 
 
 def test_пропавший_файл_стратегии_не_роняет_бота(tmp_path, caplog):

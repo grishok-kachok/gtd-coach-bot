@@ -110,7 +110,7 @@ def test_файл_и_ссылка_заводятся_вместе(tmp_path: Path
     """Заметка без ссылки — сирота, ссылка без заметки — битая."""
     index = tmp_path / "память" / "00-index.md"
     index.parent.mkdir(parents=True, exist_ok=True)
-    index.write_text("## Где Василий сейчас\n\n- [[ритмы]] — во сколько коуч пишет\n"
+    index.write_text("## Где пользователь сейчас\n\n- [[ритмы]] — во сколько коуч пишет\n"
                      "\n## Дальше\n", encoding="utf-8")
 
     assert settings.ensure(tmp_path, "2026-08-01") is True
@@ -198,3 +198,48 @@ def test_строка_режима_дописывается_в_старый_фа
     assert беды == [] and значения["режим"] == "рабочий"
     # Второй заход ничего не меняет — иначе файл рос бы каждую ночь.
     assert settings.ensure(tmp_path, "2026-08-02") is False
+
+
+def test_словарь_голоса_читается_и_проверяется(tmp_path):
+    """Личные слова для распознавателя — настройка, а не константа в коде.
+
+    Раньше список имён одного человека был зашит в питон и ехал в подсказку
+    всем. Чужое имя в подсказке заставляет распознаватель слышать его там,
+    где его не было.
+    """
+    from src import voice
+
+    путь = settings.path_in(tmp_path)
+    путь.parent.mkdir(parents=True, exist_ok=True)
+    путь.write_text(
+        "```yaml\n"
+        'модель_разговора: "claude-fable-5"\n'
+        'модель_ночной_работы: "claude-fable-5"\n'
+        "словарь_голоса: [Аглая, Кинешма]\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    values, problems = settings.read(tmp_path)
+    assert problems == []
+    assert values["словарь_голоса"] == ["Аглая", "Кинешма"]
+
+    подсказка = voice.подсказка(values["словарь_голоса"])
+    assert "Аглая" in подсказка and "Кинешма" in подсказка
+    assert "Todoist" in подсказка          # общая часть на месте
+    assert "Аглая" not in voice.подсказка()  # без настройки личного нет
+
+
+def test_словарь_голоса_не_список_это_претензия(tmp_path):
+    путь = settings.path_in(tmp_path)
+    путь.parent.mkdir(parents=True, exist_ok=True)
+    путь.write_text(
+        "```yaml\n"
+        'модель_разговора: "claude-fable-5"\n'
+        'модель_ночной_работы: "claude-fable-5"\n'
+        'словарь_голоса: "Аглая, Кинешма"\n'
+        "```\n",
+        encoding="utf-8",
+    )
+    values, problems = settings.read(tmp_path)
+    assert any("словарь_голоса" in p for p in problems)
+    assert values["словарь_голоса"] == []  # сломанный файл — умолчания целиком
