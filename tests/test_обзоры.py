@@ -11,7 +11,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from src import rituals
-from src.main import CoachBot, ВИДНО_ЗНАКОВ, КОМАНДЫ, ФРАЗЫ_КОМАНД
+from src import settings as coach_settings
+from src.main import CoachBot, ВИДНО_ЗНАКОВ, КОМАНДЫ, МОДЕЛИ, ФРАЗЫ_КОМАНД
 
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -163,5 +164,53 @@ def test_в_витрине_нет_старта():
 
 
 def test_список_команд_без_повторов():
-    имена = [имя for имя, _, _ in КОМАНДЫ]
+    имена = [имя for имя, _, _ in КОМАНДЫ] + [имя for имя, _, _ in МОДЕЛИ]
     assert len(имена) == len(set(имена)), имена
+
+
+# --- выбор модели ---
+
+
+def test_у_каждой_известной_модели_есть_команда():
+    """Список моделей живёт в настройках, команды — в телеграм-канале.
+    Разъедутся — и человек либо не сможет выбрать заведённую модель, либо
+    выберет несуществующую и бот начнёт падать на каждом ответе."""
+    assert {код for _, _, код in МОДЕЛИ} == set(coach_settings.KNOWN_MODELS)
+
+
+def test_команды_моделей_не_в_витрине():
+    """Их печатает сам бот в ответ на /model, и там они кликабельны.
+    Витрина из двенадцати пунктов перестаёт читаться."""
+    витрина = {имя for имя, _, _ in КОМАНДЫ}
+    assert not витрина & {имя for имя, _, _ in МОДЕЛИ}
+    assert "model" in витрина
+
+
+def test_модель_ставится_в_настройки(tmp_path):
+    настройки = tmp_path / "память" / "состояние" / "настройки.md"
+    настройки.parent.mkdir(parents=True)
+    настройки.write_text(
+        "# Настройки\n\nПояснение человека, которое трогать нельзя.\n\n"
+        '```yaml\nмодель_разговора: "claude-fable-5"   # комментарий человека\n'
+        'модель_ночной_работы: "claude-fable-5"\n```\n\nХвост файла.\n',
+        encoding="utf-8",
+    )
+    assert coach_settings.поставить_модель(tmp_path, "claude-opus-5")
+
+    стало = настройки.read_text(encoding="utf-8")
+    assert 'модель_разговора: "claude-opus-5"' in стало
+    # Ночная модель — отдельная настройка, её не трогаем.
+    assert 'модель_ночной_работы: "claude-fable-5"' in стало
+    # Файл живой: текст человека и его комментарий переживают правку.
+    assert "Пояснение человека, которое трогать нельзя." in стало
+    assert "Хвост файла." in стало
+    assert "# комментарий человека" in стало
+
+
+def test_незнакомая_модель_в_настройки_не_попадает(tmp_path):
+    """Опечатка в имени превращает бота в падающий на каждом ответе."""
+    настройки = tmp_path / "память" / "состояние" / "настройки.md"
+    настройки.parent.mkdir(parents=True)
+    настройки.write_text('```yaml\nмодель_разговора: "claude-fable-5"\n```\n', encoding="utf-8")
+    assert not coach_settings.поставить_модель(tmp_path, "claude-opus-6")
+    assert 'claude-fable-5' in настройки.read_text(encoding="utf-8")
