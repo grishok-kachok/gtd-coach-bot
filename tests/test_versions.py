@@ -41,6 +41,11 @@ def репозиторий(где, origin: str = "git@github.com:vefmvai/todoist
     ("https://github.com/vefmvai/gtd-coach.git", "vefmvai/gtd-coach"),
     ("https://github.com/vefmvai/gcal-mcp", "vefmvai/gcal-mcp"),
     ("https://github.com/ученик/gtd-coach-bot/", "ученик/gtd-coach-bot"),
+    # На сервере у каждого клона свой ssh-алиас под свой deploy-ключ. Точное
+    # `github.com` не находило ни одной части, и ночь молчала бы про обновления
+    # навсегда — не сломавшись и ничего не сказав (прогон 02.08.2026).
+    ("git@github-gtd-coach-bot:vefmvai/gtd-coach-bot.git", "vefmvai/gtd-coach-bot"),
+    ("git@github-gtd-coach-plugin:vefmvai/gtd-coach.git", "vefmvai/gtd-coach"),
     ("", ""),
     ("git@gitlab.com:кто-то/что-то.git", ""),
 ])
