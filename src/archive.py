@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS messages (
     channel     TEXT NOT NULL,          -- voice | text | morning | midday | evening | nudge
     text        TEXT NOT NULL,
     source      TEXT NOT NULL DEFAULT 'telegram',  -- telegram | laptop (сессия на компьютере)
-    uuid        TEXT                    -- сквозной id из Claude Code, защита от дублей при импорте
+    uuid        TEXT,                   -- сквозной id из Claude Code, защита от дублей при импорте
+    ritual      TEXT                    -- недельный | месячный | квартальный | годовой; пусто — обычный разговор
 );
 CREATE INDEX IF NOT EXISTS messages_day ON messages(day);
 -- индекс по uuid создаётся в _migrate: на живой базе колонки ещё нет в этот момент
@@ -79,6 +80,16 @@ class Archive:
             db.execute("ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'telegram'")
         if "uuid" not in cols:
             db.execute("ALTER TABLE messages ADD COLUMN uuid TEXT")
+        # Какая стратсессия шла в момент реплики. Отдельной колонкой, а не
+        # каналом: канал различает голос и текст, и подменять его значило бы
+        # менять один факт на другой. Задумка была именно каналом (поле
+        # `канал` у повода), но код не ставил его нигде — в живой базе от неё
+        # осталось два ископаемых сообщения от 01.08, когда код ещё сам
+        # запускал месячный итог. Метка, которую никто не ставит, хуже
+        # отсутствующей: по ней ищут и ничего не находят.
+        if "ritual" not in cols:
+            db.execute("ALTER TABLE messages ADD COLUMN ritual TEXT")
+        db.execute("CREATE INDEX IF NOT EXISTS messages_ritual ON messages(ritual)")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_uuid ON messages(uuid)")
         # Роль человека звалась именем владельца до 02.08.2026. Переименование —
         # операция с данными, а не правка текста: в живом архиве под старым именем
@@ -92,18 +103,20 @@ class Archive:
         return db
 
     # Пишем из обработчиков сообщений, поэтому не блокируем цикл событий.
-    async def add_message(self, role: str, channel: str, text: str, session_id: str | None) -> None:
-        await asyncio.to_thread(self._add_message, role, channel, text, session_id)
+    async def add_message(self, role: str, channel: str, text: str, session_id: str | None,
+                          ritual: str | None = None) -> None:
+        await asyncio.to_thread(self._add_message, role, channel, text, session_id, ritual)
 
-    def _add_message(self, role: str, channel: str, text: str, session_id: str | None) -> None:
+    def _add_message(self, role: str, channel: str, text: str, session_id: str | None,
+                     ritual: str | None = None) -> None:
         now = datetime.now(MOSCOW)
         try:
             with self._connect() as db:
                 db.execute(
-                    "INSERT INTO messages(day, created_at, session_id, role, channel, text, source, uuid) "
-                    "VALUES(?,?,?,?,?,?,?,?)",
+                    "INSERT INTO messages(day, created_at, session_id, role, channel, text, source, uuid, ritual) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
                     (now.date().isoformat(), now.isoformat(timespec="seconds"), session_id, role, channel, text,
-                     "telegram", None),
+                     "telegram", None, ritual),
                 )
         except sqlite3.Error:
             log.exception("не смог записать сообщение в архив")

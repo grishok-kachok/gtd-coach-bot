@@ -347,8 +347,13 @@ class CoachBot:
             # обязано случаться. Под замком, как и всё остальное: перекладывание
             # закладок посреди чужого ответа увело бы разговор не туда.
             мостик = await self._переключить_обряд(text, context)
+            # Метку берём ПОСЛЕ переключения: реплика «проведём недельную»
+            # уже принадлежит стратсессии, которую сама и открыла, а «закончить»
+            # — уже обычному разговору. Иначе у каждой стратсессии в архиве
+            # не хватало бы первой реплики и лишней была бы последняя.
+            ритуал = self.engine.обряд_ключ
             await self.archive.add_message(
-                "user", channel, archived_as or text, self.engine.sessions.load()
+                "user", channel, archived_as or text, self.engine.sessions.load(), ритуал
             )
             typing = asyncio.create_task(self._keep_typing(chat_id, context))
             mode = self.engine.режим()
@@ -375,7 +380,9 @@ class CoachBot:
                 answer = f"Сломался: {type(error).__name__}: {error}"
             finally:
                 typing.cancel()
-            await self.archive.add_message("coach", channel, answer, self.engine.sessions.load())
+            await self.archive.add_message(
+                "coach", channel, answer, self.engine.sessions.load(), ритуал
+            )
 
         # Коуч мог только что поменять ритмы по просьбе пользователя — заметить это надо
         # сразу, а не через час: «пиши мне три раза в день» должно работать как фраза.

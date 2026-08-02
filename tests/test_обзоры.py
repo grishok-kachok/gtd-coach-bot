@@ -7,11 +7,13 @@
 """
 
 import re
+import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from src import rituals
 from src import settings as coach_settings
+from src.archive import Archive
 from src.main import (
     CoachBot, ВИДНО_ЗНАКОВ, КОМАНДЫ, МОДЕЛИ, СТРАТСЕССИИ, ФРАЗЫ_КОМАНД,
 )
@@ -186,6 +188,57 @@ def test_у_каждой_команды_стратсессии_есть_живо
         assert ключ in rituals.ПОВОДЫ, f"/{имя} ссылается на несуществующий повод"
         assert rituals.ПОВОДЫ[ключ].какая, ключ
     assert {ключ for _, _, ключ in СТРАТСЕССИИ} == set(rituals.ПОВОДЫ)
+
+
+# --- метка стратсессии в архиве ---
+
+
+def test_реплики_стратсессии_помечены_в_архиве(tmp_path):
+    """Без метки стратсессию в архиве не найти: сырьё лежит вперемешку
+    с обычным разговором, а session_id — безымянный uuid.
+
+    Задумка была полем `канал` у повода, но его не ставил никто, и в живой
+    базе от неё осталось два ископаемых сообщения. Метка, по которой ищут
+    и не находят, хуже отсутствующей."""
+    архив = Archive(tmp_path / "coach.db")
+    архив._add_message("user", "text", "обычная реплика", "с1")
+    архив._add_message("user", "voice", "внутри стратсессии", "с2", "недельный")
+    архив._add_message("coach", "text", "ответ внутри", "с2", "недельный")
+
+    with sqlite3.connect(tmp_path / "coach.db") as db:
+        внутри = db.execute(
+            "SELECT text, channel FROM messages WHERE ritual=? ORDER BY id", ("недельный",)
+        ).fetchall()
+        обычных = db.execute("SELECT count(*) FROM messages WHERE ritual IS NULL").fetchone()[0]
+
+    assert [т for т, _ in внутри] == ["внутри стратсессии", "ответ внутри"]
+    # Канал не подменён: голос остался голосом. Метка — отдельный факт.
+    assert [к for _, к in внутри] == ["voice", "text"]
+    assert обычных == 1
+
+
+def test_старая_база_дотягивается_до_колонки(tmp_path):
+    """Живой архив ведёт историю с 20.07 — переезд обязан быть добавляющим."""
+    path = tmp_path / "coach.db"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, session_id TEXT, role TEXT NOT NULL, "
+            "channel TEXT NOT NULL, text TEXT NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO messages(day, created_at, role, channel, text) VALUES(?,?,?,?,?)",
+            ("2026-07-20", "2026-07-20T10:00:00", "user", "text", "старая реплика"),
+        )
+
+    Archive(path)   # поднялись на старой базе
+
+    with sqlite3.connect(path) as db:
+        колонки = {r[1] for r in db.execute("PRAGMA table_info(messages)")}
+        assert "ritual" in колонки
+        # Старое на месте и помечено как обычный разговор, а не как стратсессия.
+        строка = db.execute("SELECT text, ritual FROM messages").fetchone()
+        assert строка == ("старая реплика", None)
 
 
 # --- выбор модели ---
