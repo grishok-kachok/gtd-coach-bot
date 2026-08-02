@@ -61,6 +61,35 @@ class SessionStorage:
     def save_mode(self, name: str) -> None:
         self._mode_path().write_text(name, encoding="utf-8")
 
+    # --- идущая стратсессия ---
+    #
+    # Рядом с закладкой и по той же причине, что режим: обязана пережить
+    # рестарт контейнера. До 02.08.2026 она жила в памяти процесса, хотя
+    # комментарий в движке обещал обратное, — и перезапуск посреди стратсессии
+    # ронял разом всё: режим возвращался к рабочему, закладка не сходилась
+    # с ним и разговор рвался, а отложенный так и оставался на полке навсегда,
+    # потому что снимать его было уже некому. Деплой делает ровно это.
+
+    def _обряд_path(self) -> Path:
+        return self.path.with_name(self.path.name + "_обряд")
+
+    def обряд(self) -> dict | None:
+        """Какая стратсессия идёт: {«режим», «ключ»}. Пусто — никакая."""
+        try:
+            данные = json.loads(self._обряд_path().read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+        return данные if isinstance(данные, dict) and данные.get("режим") else None
+
+    def начать_обряд(self, режим: str, ключ: str) -> None:
+        self._обряд_path().write_text(
+            json.dumps({"режим": режим, "ключ": ключ}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def кончить_обряд(self) -> None:
+        self._обряд_path().unlink(missing_ok=True)
+
     # --- отложенный разговор ---
 
     def _shelf_path(self) -> Path:
