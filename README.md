@@ -90,6 +90,10 @@ OpenAI». Если не вышло совсем — сообщение с чис
 
 ## Развернуть
 
+> **Не программисту сюда:** [`УСТАНОВКА.md` в плагине](https://github.com/vefmvai/gtd-coach/blob/main/УСТАНОВКА.md).
+> Там тот же порядок, но написан так, чтобы всю работу сделал Claude Code,
+> а человек только отвечал на вопросы и нажимал кнопки в браузере.
+
 ```bash
 git clone git@github.com:vefmvai/gtd-coach-bot.git /opt/apps/gtd-coach-bot
 cd /opt/apps/gtd-coach-bot
