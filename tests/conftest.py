@@ -53,3 +53,35 @@ for имена in (TODOIST_ИМЕНА, CALENDAR_ИМЕНА):
     папка = сосед(имена)
     if папка is not None:
         sys.path.insert(0, str(папка / "src"))
+
+
+def pytest_configure(config):
+    """Сказать по-человечески, чего не хватает, вместо ModuleNotFoundError.
+
+    Бот не работает без пакетов инструментов: в контейнере они приезжают
+    смонтированными клонами, при работе из исходников — соседними папками.
+    Зависимость настоящая, а вот сообщение «No module named 'todoist_mcp'»
+    в двенадцати ошибках сборки ничего человеку не говорит. Первое, что видит
+    склонировавший, не должно быть нечитаемым красным.
+    """
+    import pytest
+
+    нет = []
+    for модуль, имена, репо in (
+        ("todoist_mcp", TODOIST_ИМЕНА, "todoist-mcp"),
+        ("gcal_mcp", CALENDAR_ИМЕНА, "gcal-mcp"),
+    ):
+        try:
+            __import__(модуль)
+        except ImportError:
+            нет.append(f"  {репо} — искал папки: {', '.join(имена)}")
+    if нет:
+        raise pytest.UsageError(
+            "Рядом не хватает репозиториев с инструментами:\n"
+            + "\n".join(нет)
+            + "\n\nСклонируй их соседними папками — бот без них не работает "
+            "и в бою:\n"
+            "  git clone https://github.com/vefmvai/todoist-mcp.git\n"
+            "  git clone https://github.com/vefmvai/gcal-mcp.git\n"
+            "  git clone https://github.com/vefmvai/gtd-coach.git"
+        )
