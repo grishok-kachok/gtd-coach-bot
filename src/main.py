@@ -671,7 +671,21 @@ class CoachBot:
             await context.bot.send_message(chat_id=chat_id, text="Тишина — ничего не разобрал.")
             return
 
-        await context.bot.send_message(chat_id=chat_id, text=f"🎙 {text}")
+        # Расшифровка — ответом на само голосовое и цитатой, а не обычной
+        # репликой. Владелец читал её как слова коуча: она приходила с его
+        # стороны, обычным шрифтом, и микрофончика в начале не хватало, чтобы
+        # понять, что это его собственные слова.
+        #
+        # Дописать подпись прямо в голосовое нельзя: бот правит только свои
+        # сообщения, а голосовое отправил человек. Ближе к этому API не даёт,
+        # поэтому берём два признака сразу — привязку к сообщению (видно,
+        # к чему относится) и цитату курсивом (видно, что это не речь коуча).
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"<blockquote><i>🎙 {html.escape(text)}</i></blockquote>",
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=message.message_id,
+        )
         await self._think_and_reply(text, chat_id, context, channel="voice")
 
     @staticmethod
