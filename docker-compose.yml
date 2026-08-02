@@ -1,6 +1,11 @@
 services:
   gtd-coach-bot:
-    build: .
+    build:
+      context: .
+      args:
+        # Какой коммит вшиваем в образ. Ставит его ./update.sh; собрали руками —
+        # приедет пусто, и `/version` честно скажет «сборка неизвестна».
+        GIT_SHA: ${GIT_SHA:-}
     container_name: gtd-coach-bot
     restart: unless-stopped
     mem_limit: 1g              # питон-поллер лёгкий, но процесс claude внутри тяжёлый
@@ -48,6 +53,15 @@ services:
       # в нём принимает лишь локальный путь. Плагин подхватывается на СЛЕДУЮЩЕЙ
       # сессии, поэтому выкатка всегда с рестартом.
       - /opt/apps/gtd-coach-plugin:/plugin:ro
+      # Версии частей продукта. Смонтирована ТОЛЬКО папка `.git`, а не клон
+      # целиком: в клоне бота лежат `.env`, ключи и мозг — открывать их второй
+      # дверью незачем, а для `rev-parse` и `remote get-url` хватает `--git-dir`.
+      # Плагина здесь нет: его клон уже смонтирован выше целиком, `.git` внутри.
+      # Не склонированного соседа (ученик без календаря) docker подставит пустой
+      # папкой — `/version` скажет «не установлен», и это правда.
+      - /opt/apps/gtd-coach-bot/.git:/repos/gtd-coach-bot.git:ro
+      - /opt/apps/todoist-mcp/.git:/repos/todoist-mcp.git:ro
+      - /opt/apps/gcal-mcp/.git:/repos/gcal-mcp.git:ro
       - archive:/archive                           # сырьё разговоров + выжимки (в бэкапе по имени тома)
     # Живость поллера: свежесть пульса главного цикла + ответ Telegram через прокси.
     # Подробности и обоснование — в src/healthcheck.py. Красный healthcheck сам

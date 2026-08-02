@@ -145,3 +145,88 @@ def test_у_каждого_обзора_свой_повод():
         находка = backstage.FINDINGS[ключ]
         assert находка.title and находка.why
         assert "режим" in находка.why, f"«{ключ}» не говорит, куда переключаться"
+
+
+# --- обновления продукта ---
+
+
+def test_обновление_и_движок_это_два_разных_повода():
+    """Действия разные: репозитории тянет ./update.sh, движок поднимает человек
+    осознанным коммитом. Одна задача на двоих сказала бы «обновись», не сказав,
+    что руками надо сделать разное."""
+    обновление, движок = backstage.FINDINGS["обновление"], backstage.FINDINGS["движок"]
+    assert обновление.title != движок.title
+    assert "update.sh" in обновление.why, "задача обязана говорить, чем обновляться"
+    assert "update.sh" not in движок.why, "движок командой не поднимается — он запинен"
+    assert "коммит" in движок.why
+
+
+def подделать_отчёт(monkeypatch, отчёт):
+    """Подменить сверку версий: сеть в тестах не трогаем."""
+    from src import main as главный
+
+    async def проверить(*_а, **_к):
+        return отчёт
+
+    monkeypatch.setattr(главный.versions, "проверить", проверить)
+    return главный
+
+
+class ТолькоТокен:
+    """Ночная сверка из всего бота берёт один токен — больше ей ничего не надо."""
+
+    todoist_token = "токен"
+
+
+def test_ночная_сверка_ставит_по_задаче_на_повод(todoist, monkeypatch):
+    from src import versions
+
+    главный = подделать_отчёт(monkeypatch, [
+        versions.Состояние(имя="плагин", стоит="aaaaaaa", новее="bbbbbbb", отстал_на=3),
+        versions.Состояние(имя="движок", стоит="2.1.216", новее="2.2.0"),
+    ])
+    asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
+    названия = [к["content"] for к in todoist.created]
+    assert названия == [
+        backstage.FINDINGS["обновление"].title,
+        backstage.FINDINGS["движок"].title,
+    ]
+    assert "плагин" in todoist.created[0]["description"]
+
+
+def test_три_новых_коммита_не_дают_трёх_задач(todoist, monkeypatch):
+    """Правило «одна задача на повод». Копилка, в которую сыплются одинаковые
+    карточки, перестаёт читаться — так умерли семь карточек-маяков."""
+    from src import versions
+
+    главный = подделать_отчёт(monkeypatch, [
+        versions.Состояние(имя="бот", стоит="aaaaaaa", новее="bbbbbbb", отстал_на=3),
+    ])
+    asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
+    asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
+    assert len(todoist.created) == 1, "вторая ночь завела вторую задачу"
+    assert len(todoist.comments) == 1, "вторая ночь должна дописать комментарий"
+
+
+def test_всё_свежее_и_задач_не_появляется(todoist, monkeypatch):
+    from src import versions
+
+    главный = подделать_отчёт(monkeypatch, [
+        versions.Состояние(имя="бот", стоит="aaaaaaa"),
+        versions.Состояние(имя="движок", стоит="2.1.216"),
+    ])
+    asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
+    assert todoist.created == []
+
+
+def test_упавшая_сверка_не_роняет_ночной_прогон(todoist, monkeypatch):
+    """Ночью после неё идут выжимка недели, профиль и причёска истории.
+    Уронить всё это из-за недоступного GitHub — плохой размен."""
+    from src import main as главный
+
+    async def падает(*_а, **_к):
+        raise RuntimeError("GitHub лёг")
+
+    monkeypatch.setattr(главный.versions, "проверить", падает)
+    asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
+    assert todoist.created == []

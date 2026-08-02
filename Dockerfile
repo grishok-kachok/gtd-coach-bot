@@ -35,8 +35,21 @@ RUN useradd -u 1000 -m coach && mkdir -p /brain /state /archive \
     && chown -R coach /app /brain /state /archive
 USER coach
 
+# Что именно вшито в этот образ. Код бота лежит ВНУТРИ образа, `.git` рядом
+# с ним нет — узнать версию изнутри больше неоткуда, и «посмотреть HEAD клона»
+# ответом не является: клон подтянут, а образ не пересобран — штатное состояние,
+# и 31.07 выкатка на нём уже соврала про успех.
+#
+# Стоит В КОНЦЕ намеренно: слой с ARG инвалидируется при каждом коммите,
+# и выше него не должно быть ничего дорогого — ни pip, ни npm.
+#
+# Пусто — значит собирали не командой обновления. Это честное «неизвестно»,
+# и `/version` так и скажет; выдумывать сюда нечего.
+ARG GIT_SHA=
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    HOME=/home/coach
+    HOME=/home/coach \
+    GIT_SHA=${GIT_SHA} \
+    CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 CMD ["python", "-m", "src.main"]
