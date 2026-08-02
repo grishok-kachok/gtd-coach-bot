@@ -24,6 +24,7 @@ class Заглушка(CoachEngine):
         self._режим = режим
         self.brain_dir = состояние
         self._prompt_cache = {}
+        self.обряд = None
 
     def _settings(self):
         return {"режим": self._режим, "модель_разговора": "claude-fable-5"}
