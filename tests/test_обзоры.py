@@ -12,7 +12,9 @@ from zoneinfo import ZoneInfo
 
 from src import rituals
 from src import settings as coach_settings
-from src.main import CoachBot, ВИДНО_ЗНАКОВ, КОМАНДЫ, МОДЕЛИ, ФРАЗЫ_КОМАНД
+from src.main import (
+    CoachBot, ВИДНО_ЗНАКОВ, КОМАНДЫ, МОДЕЛИ, СТРАТСЕССИИ, ФРАЗЫ_КОМАНД,
+)
 
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -164,8 +166,17 @@ def test_в_витрине_нет_старта():
 
 
 def test_список_команд_без_повторов():
-    имена = [имя for имя, _, _ in КОМАНДЫ] + [имя for имя, _, _ in МОДЕЛИ]
+    имена = ([имя for имя, _, _ in КОМАНДЫ] + [имя for имя, _, _ in МОДЕЛИ]
+             + [имя for имя, _ in СТРАТСЕССИИ])
     assert len(имена) == len(set(имена)), имена
+
+
+def test_стратсессии_не_в_витрине_а_выход_в_ней():
+    """Четыре строки, отличающиеся одним словом, витрину замусоривали.
+    А `/end` остаётся: искать его придётся изнутри стратсессии."""
+    витрина = {имя for имя, _, _ in КОМАНДЫ}
+    assert not витрина & {имя for имя, _ in СТРАТСЕССИИ}
+    assert {"session", "end"} <= витрина
 
 
 # --- выбор модели ---
