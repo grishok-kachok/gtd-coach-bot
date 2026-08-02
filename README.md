@@ -95,9 +95,14 @@ git clone git@github.com:vefmvai/gtd-coach-bot.git /opt/apps/gtd-coach-bot
 cd /opt/apps/gtd-coach-bot
 cp .env.example .env && vim .env          # токены, см. комментарии в файле
 git clone <свой-приватный-репозиторий-памяти> data/brain
-docker compose up -d --build
+./update.sh                               # первая сборка — та же команда, что и обновление
 docker compose logs -f
 ```
+
+Первая сборка идёт `./update.sh`, а не `docker compose up --build`, ровно
+по одной причине: команда вшивает в образ номер версии. Собранный руками образ
+не знает, из какого коммита он собран, и `/version` честно скажет «сборка
+неизвестна».
 
 Мозг — **свой у каждого**: приватный репозиторий, который вы заводите себе сами.
 Пустой скелет с объяснениями «что сюда кладут» лежит в плагине,
