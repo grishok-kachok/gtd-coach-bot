@@ -34,6 +34,7 @@ from .context_cost import ContextCost
 from . import detectors
 from .digest import Digester
 from .engine import CoachEngine
+from . import glossary
 from .memory_watch import MemoryWatch
 from . import modes as режимы_модуль
 from . import profile
@@ -638,6 +639,16 @@ class CoachBot:
             return
         await self._think_and_reply(update.message.text, update.effective_chat.id, context)
 
+    def _слова_для_распознавателя(self) -> list[str]:
+        """Свои слова человека для подсказки распознавателю.
+
+        Отдельным методом, а не строкой внутри обработчика голосового, ровно
+        по причине самой заявки: слово лежало в памяти, а до распознавателя
+        не доезжало. Молчаливо оборванная проводка — это и есть та беда;
+        отсюда её видно тесту.
+        """
+        return glossary.слова(self.engine.brain_dir)
+
     async def on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._mine(update):
             return
@@ -679,9 +690,9 @@ class CoachBot:
                     on_retry=warn,
                 )
             )
-            словарь = list((self.engine._settings() or {}).get("словарь_голоса") or [])
             text = await self.voice.transcribe(
-                audio, on_retry=warn, on_switch=switched, словарь=словарь)
+                audio, on_retry=warn, on_switch=switched,
+                глоссарий=self._слова_для_распознавателя())
         except Exception as error:
             log.exception("расшифровка не удалась")
             await context.bot.send_message(chat_id=chat_id, text=f"Не разобрал голос: {error}")
