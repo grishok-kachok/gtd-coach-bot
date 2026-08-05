@@ -10,7 +10,7 @@ FROM python:3.12-slim
 # 02.08.2026: 2.1.216 → 2.1.220 по решению владельца. Первый подъём версии
 # через новый порядок: ночная сверка сказала, что вышла новая, человек решил,
 # что поднимаем, — и это отдельный коммит, а не побочный эффект сборки.
-ARG CLAUDE_CODE_VERSION=2.1.220
+ARG CLAUDE_CODE_VERSION=2.1.222
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates curl gnupg openssh-client \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
