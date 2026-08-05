@@ -36,6 +36,7 @@ from .context_cost import ContextCost
 from . import detectors
 from .digest import Digester
 from .engine import CoachEngine
+from .inbox import Inbox
 from . import glossary
 from .memory_watch import MemoryWatch
 from . import modes as режимы_модуль
@@ -302,6 +303,10 @@ class CoachBot:
         # Заполняется в run(): через это приложение уходят файлы и жалобы канала.
         self.app: Application | None = None
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
+        # Полка входящих: заявки, предложения памяти, промахи, поломки. Один
+        # экземпляр на всех потребителей — движок, ночная проверка, ночные
+        # находки, — потому что таблица одна и правила у неё одни.
+        self.inbox = Inbox(Path(env("ARCHIVE_DB", "/archive/coach.db")))
         # Состав режимов приезжает из плагина. Сломан или отсутствует — падаем
         # здесь, одной понятной строкой: без состава неизвестно, что класть
         # коучу в голову, а зашитый в питон запасной был бы вторым домом.
@@ -337,6 +342,7 @@ class CoachBot:
                 "send": self._send_document,
             },
             undo=build_undo_server(self.comments),
+            inbox=self.inbox,
         )
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         self.voice = self._voice_recognizer()
@@ -358,7 +364,7 @@ class CoachBot:
                                  mode=фон, cost=self.cost)
         self.tidier = HistoryTidier(self.brain_dir, model=night_model,
                                     mode=фон, cost=self.cost)
-        self.memory_watch = MemoryWatch(self.brain_dir, model=night_model,
+        self.memory_watch = MemoryWatch(self.brain_dir, self.inbox, model=night_model,
                                         mode=фон, cost=self.cost)
         # Несгораемая история дел: Todoist на Free помнит ~неделю, снимок помнит всё.
         self.snapshot = TodoistSnapshot(
@@ -1227,8 +1233,8 @@ class CoachBot:
                 # только на СВЕЖУЮ находку — значит её можно было закрыть,
                 # не разобрав ни строки, и полная копилка молчала дальше.
                 # Ровно та болезнь, которую проект ловит с 31.07: у правила
-                # «разобранное вычёркивай» не было прибора. Теперь у копилки
-                # есть норма — невычеркнутых строк старше двух недель нет.
+                # «разобранное вычёркивай» не было прибора. Теперь норма считается
+                # по полке и накрывает все виды сразу (этап 20).
                 висит, старая = await asyncio.to_thread(
                     self.memory_watch.залежалось, today
                 )
@@ -1241,10 +1247,10 @@ class CoachBot:
                     )
                 if висит:
                     поводы.append(
-                        f"Залежалось: {висит} строк не вычеркнуто, самая старая "
-                        f"от {старая}. Невычеркнутая строка значит «не разобрали»: "
-                        f"подтверждённое переносится в знания, отклонённое "
-                        f"вычёркивается с причиной."
+                        f"Залежалось: {висит} записей не разобрано, самая старая "
+                        f"от {старая}. Запись закрывается статусом с итогом: "
+                        f"подтверждённое — «сделана», отклонённое — «отклонена» "
+                        f"с причиной, отложенное — «отложена» с датой возврата."
                     )
                 if поводы:
                     await raise_task(self.todoist_token, "предложения", " ".join(поводы))
@@ -1327,6 +1333,7 @@ class CoachBot:
                             self.todoist_token, "синхронизация",
                             f"Ночь {yesterday.isoformat()}: изменения в мозге есть, "
                             f"а на GitHub они не уехали.",
+                            inbox=self.inbox,
                         )
 
                 # История дня подписывается по-человечески той же моделью,
@@ -1435,7 +1442,7 @@ class CoachBot:
             беда.append("битые ссылки (ссылка есть, файла нет): " + ", ".join(битые))
         строка = "; ".join(беда)
         log.warning("оглавление памяти разошлось: %s", строка)
-        await raise_task(self.todoist_token, "оглавление", строка)
+        await raise_task(self.todoist_token, "оглавление", строка, inbox=self.inbox)
 
     async def _check_load(self, mode, channel: str, summary: str = "", prompt: str = "") -> None:
         """Сверить то, что реально уехало в контекст, с паспортом памяти.
@@ -1488,7 +1495,8 @@ class CoachBot:
         if beef:
             log.warning("стартовая загрузка разошлась с паспортом: %s", beef)
             # Сигнализация без реакции — декорация. Лампочка горит → задача с датой.
-            await raise_task(self.todoist_token, "потолок", f"[{mode.имя}, {channel}] {beef}")
+            await raise_task(self.todoist_token, "потолок", f"[{mode.имя}, {channel}] {beef}",
+                             inbox=self.inbox)
 
     # --- ритмы ---
 
@@ -1533,7 +1541,8 @@ class CoachBot:
                 )
                 # Сообщение уползёт вверх и забудется — дублируем задачей с датой.
                 await raise_task(
-                    self.todoist_token, "ритмы", f"{beef}\nАдрес: {path_in(self.brain_dir)}"
+                    self.todoist_token, "ритмы", f"{beef}\nАдрес: {path_in(self.brain_dir)}",
+                    inbox=self.inbox,
                 )
             return
         self.broken_rhythms = ""

@@ -22,6 +22,8 @@ from claude_agent_sdk import (
 from . import modes as режимы_модуль
 from .context_cost import ContextCost, контекст, разобрать
 from .gcal import build_calendar_server
+from .inbox import Inbox
+from .inbox_tool import build_inbox_server
 from .modes import Режим
 from .settings import read as read_settings
 from .sessions import SessionStorage
@@ -59,6 +61,7 @@ class CoachEngine:
         modes: dict[str, Режим],
         todoist_token: str,
         model: str,
+        inbox: Inbox,
         effort: str = "medium",
         calendar: dict | None = None,
         extra_dirs: list[Path] | None = None,
@@ -105,7 +108,17 @@ class CoachEngine:
         self._switches: dict[str, dict[str, bool]] = self._read_switches()
         self.todoist_server = build_todoist_server(todoist_token, self._switches["todoist"])
         # Заявки: «хочу, чтобы ты умел X» — коуч записывает, а не делает.
-        self.wishes_server = build_wishes_server(brain_dir, todoist_token)
+        # Ложатся на полку входящих, туда же, куда ночные находки. Полка
+        # передаётся снаружи и умолчания не имеет намеренно: она живёт в базе
+        # рядом с архивом, а угаданный путь завёл бы её внутри мозга — то есть
+        # двоичный файл внутри git-репозитория, который синхронизируется.
+        self.inbox = inbox
+        self.wishes_server = build_wishes_server(self.inbox, todoist_token)
+        # Разбор предложений памяти. Только их: заявку, промах и поломку коуч
+        # показать может, а сделать — нет, их чинит человек правкой кода.
+        # Обзор, где восемнадцать заявок подряд получают ответ «это не ко мне»,
+        # вытесняет то, ради чего обзор и собирался.
+        self.inbox_server = build_inbox_server(self.inbox)
         # Дашборд — файл в телеграм. Отправка обязана случаться, значит инструмент.
         self.dashboard_server = build_dashboard_server(**dashboard) if dashboard else None
         # Откат того, что коуч сделал по комментарию в Todoist. Кнопка, а не
@@ -138,7 +151,8 @@ class CoachEngine:
 
         total = 0
         for server in (self.todoist_server, self.calendar_server, self.wishes_server,
-                       self.dashboard_server, self.undo_server, self.recall_server):
+                       self.dashboard_server, self.undo_server, self.recall_server,
+                       self.inbox_server):
             if not server:
                 continue
             try:
@@ -257,8 +271,9 @@ class CoachEngine:
 
     def _options(self, resume: str | None, mode: Режим, values: dict | None) -> ClaudeAgentOptions:
         self._refresh_tools(values)
-        mcp_servers = {"todoist": self.todoist_server, "wishes": self.wishes_server}
-        allowed = ["mcp__todoist", "mcp__wishes"]
+        mcp_servers = {"todoist": self.todoist_server, "wishes": self.wishes_server,
+                       "inbox": self.inbox_server}
+        allowed = ["mcp__todoist", "mcp__wishes", "mcp__inbox"]
         if mode.встроенные_инструменты:
             allowed = MEMORY_TOOLS + allowed
         if self.calendar_server is not None:

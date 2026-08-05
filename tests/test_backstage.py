@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import sqlite3
 
 import pytest
 
@@ -275,3 +276,70 @@ def test_упавшая_сверка_не_роняет_ночной_прогон
     monkeypatch.setattr(главный.versions, "проверить", падает)
     asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
     assert todoist.created == []
+
+
+# ── размер задачи и копилка поломок (этап 20) ────────────────────────────────
+
+
+def test_у_задачи_есть_метка_размера(todoist):
+    """Бот ставил свои задачи без размера — и сам же считал их отклонением.
+
+    Детектор `без_размера` смотрит на активные задачи без `⏱️`, а `перегруз`
+    считает день по этим же меткам: задача без метки весит ноль часов. То есть
+    бот рисовал себе «без размера 4 из 7» и одновременно занижал загрузку дня.
+    """
+    asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
+    метки = todoist.created[0]["labels"]
+    assert "актив" in метки
+    assert any(м.startswith("⏱️") for м in метки), "задача снова без размера"
+
+
+def test_размер_по_вкладу_человека_а_не_по_объёму(todoist):
+    """Заявка владельца 04.08: человеко-часы против машино-часов."""
+    assert backstage.FINDINGS["движок"].размер == backstage.S, "движок поднимает агент"
+    assert backstage.FINDINGS["оглавление"].размер == backstage.S
+    assert backstage.FINDINGS["недельный обзор"].размер == backstage.M, "человек сидит сам"
+    assert backstage.FINDINGS["завал"].размер == backstage.M
+    assert backstage.FINDINGS["месячный итог"].размер == backstage.L
+
+
+def test_поломка_ложится_на_полку_и_считает_повторы(todoist, tmp_path):
+    from src.inbox import ПОЛОМКА, Inbox
+
+    полка = Inbox(tmp_path / "coach.db")
+    asyncio.run(backstage.raise_task("t", "ритмы", "файл не читается", inbox=полка))
+    asyncio.run(backstage.raise_task("t", "ритмы", "файл не читается", inbox=полка))
+
+    записи = полка.открытые(ПОЛОМКА)
+    assert len(записи) == 1, "вторая поломка завела вторую запись вместо счётчика"
+    assert записи[0]["случаев"] == 2
+    # Второй раз задача уже стоит — значит про повтор говорит комментарий.
+    assert "2-й раз" in todoist.comments[0]["content"]
+
+
+def test_первый_случай_про_повторы_молчит(todoist, tmp_path):
+    """«Случилось 1-й раз» — шум: сторож, который говорит лишнее, не читается."""
+    from src.inbox import Inbox
+
+    asyncio.run(backstage.raise_task("t", "ритмы", "файл не читается",
+                                     inbox=Inbox(tmp_path / "coach.db")))
+    assert "раз" not in todoist.created[0]["description"].split("Норма")[0][-40:]
+
+
+def test_обновление_поломкой_не_считается(todoist, tmp_path):
+    """Версии не ломаются, а выходят: счёт «вышло 14 версий» ничего не диагностирует."""
+    from src.inbox import Inbox
+
+    полка = Inbox(tmp_path / "coach.db")
+    asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222", inbox=полка))
+    assert полка.сколько() == {}
+
+
+def test_упавшая_полка_не_отменяет_задачу(todoist, tmp_path):
+    """Задача была единственным контуром до полки — она обязана встать и теперь."""
+    class Сломанная:
+        def поломка(self, *_а, **_к):
+            raise sqlite3.OperationalError("database is locked")
+
+    asyncio.run(backstage.raise_task("t", "ритмы", "файл не читается", inbox=Сломанная()))
+    assert len(todoist.created) == 1

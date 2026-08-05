@@ -6,7 +6,13 @@
 теряться не должна: за восемь дней жизни бота набралось четыре случая, когда
 хотелось «а сделай, чтобы ты…».
 
-Отсюда мост из телеграма к человеку: заявка ложится в мозг, а решает он.
+Отсюда мост из телеграма к человеку: заявка ложится на полку входящих, а решает он.
+
+**Полка, а не файл в мозге** (этап 20, 05.08.2026). Заявки жили в
+`память/журнал/заявки.md`, и «разобрано» означало зачёркивание строки руками.
+За неделю накопилось 18 заявок и ни одного зачёркивания — при том что одна была
+разобрана и итог записан абзацем ниже. Отметка, которую надо не забыть
+поставить, не ставится.
 
 Почему инструмент, а не просьба в конституции. Ровно та же разница, из-за
 которой протекло знание: просьба «запиши заявку в такой-то файл» срабатывает,
@@ -16,29 +22,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import sqlite3
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from .backstage import raise_task
-from .notes import append
+from .inbox import ЗАЯВКА, Inbox
 
 log = logging.getLogger(__name__)
 
-WISHES = "заявки.md"
 
-NOTE = (
-    "Собирает сам коуч, когда пользователь просит новую способность. Это НЕ обещание "
-    "и не задача: код бота меняет человек сам. Разобранную заявку "
-    "вычеркни и припиши, чем кончилось."
-)
-
-
-def build_wishes_server(brain_dir: Path, todoist_token: str = "", tz: str = "Europe/Moscow"):
+def build_wishes_server(inbox: Inbox, todoist_token: str = "", tz: str = "Europe/Moscow"):
     @tool(
         "record_wish",
         "Записать заявку на новую способность коуча. Звать, когда пользователь просит "
@@ -54,17 +53,9 @@ def build_wishes_server(brain_dir: Path, todoist_token: str = "", tz: str = "Eur
         why = (args.get("why") or "").strip()
 
         today: date = datetime.now(ZoneInfo(tz)).date()
-        block = f"\n## {today.isoformat()}\n\n- **{what}**\n"
-        if why:
-            block += f"  Зачем: {why}\n"
         try:
-            path = append(
-                brain_dir / "память" / "журнал" / WISHES, day=today, block=block,
-                title="заявки", heading="Заявки на новые способности коуча",
-                note=NOTE, ref="заявки владельца, накопительный список",
-                author="агент-коуч (со слов пользователя)", tags="заявка",
-            )
-        except OSError:
+            await asyncio.to_thread(inbox.положить, ЗАЯВКА, what, зачем=why, день=today)
+        except (sqlite3.Error, ValueError):
             log.exception("не смог записать заявку")
             return {"content": [{"type": "text", "text": "Не смог записать заявку — скажи об этом вслух."}]}
 
@@ -75,7 +66,7 @@ def build_wishes_server(brain_dir: Path, todoist_token: str = "", tz: str = "Eur
 
         log.info("заявка записана: %s", what[:80])
         return {"content": [{"type": "text", "text": (
-            f"Заявка записана в {path.name}: «{what}». Скажи пользователю, что записал и что "
+            f"Заявка записана: «{what}». Скажи пользователю, что записал и что "
             "делать это будет человек, а не ты сам."
         )}]}
 
