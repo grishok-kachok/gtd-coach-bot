@@ -44,6 +44,11 @@ class ПоддельныйTodoist:
                 "backstage снова ищет поиском — он врёт на свежих задачах")
         raise AssertionError(f"неожиданный GET {path}")
 
+    @property
+    def находки(self):
+        """Созданные карточки без служебной крыши: тесты писались про находки."""
+        return [з for з in self.created if з["content"] != backstage.КРЫША]
+
     async def post(self, path, json=None):
         if path == "/comments":
             self.comments.append(json)
@@ -65,11 +70,15 @@ def todoist(monkeypatch):
 def test_первая_находка_заводит_задачу_с_датой(todoist):
     исход = asyncio.run(backstage.raise_task("токен", "промахи", "промахов 3"))
     assert исход == "создана"
-    карточка = todoist.created[0]
+    карточка = todoist.находки[0]
     assert карточка["content"] == backstage.FINDINGS["промахи"].title
     assert карточка["due_string"], "задача без даты сама не вернётся"
-    assert карточка["project_id"] == "p1"
     assert "промахов 3" in карточка["description"]
+    # Промахи чинятся правкой кода — значит подзадача под крышей, а место
+    # ей задаёт родитель. В проект кладётся сама крыша.
+    assert карточка["parent_id"]
+    крыша = [з for з in todoist.created if з["content"] == backstage.КРЫША][0]
+    assert крыша["project_id"] == "p1"
 
 
 def test_вторая_находка_не_плодит_задачу_а_комментирует(todoist, tmp_path, monkeypatch):
@@ -80,7 +89,7 @@ def test_вторая_находка_не_плодит_задачу_а_комм�
     исход = asyncio.run(backstage.raise_task("токен", "предложения", "вторая ночь"))
 
     assert исход == "дополнена"
-    assert len(todoist.created) == 1, "вторая задача на ту же копилку — засорение"
+    assert len(todoist.находки) == 1, "вторая задача на ту же копилку — засорение"
     # Маркер обязателен: этот комментарий пишет бот, и через три минуты его
     # увидит опрос канала. По автору своё от хозяйского не отличается —
     # бот работает токеном пользователя.
@@ -187,7 +196,7 @@ def test_описание_человеческого_повода_без_бло�
 def test_заведённая_задача_несёт_текст_в_описании(todoist):
     """Проверка сквозь: текст обязан доехать до карточки, а не остаться в коде."""
     asyncio.run(backstage.raise_task("токен", "промахи", "промахов 3"))
-    карточка = todoist.created[0]
+    карточка = todoist.находки[0]
     assert backstage.ШАПКА_АГЕНТУ in карточка["description"]
     assert "memory_watch.py" in карточка["description"]
     assert "промахов 3" in карточка["description"]
@@ -232,12 +241,12 @@ def test_ночная_сверка_ставит_по_задаче_на_пово�
         versions.Состояние(имя="движок", стоит="2.1.216", новее="2.2.0"),
     ])
     asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
-    названия = [к["content"] for к in todoist.created]
+    названия = [к["content"] for к in todoist.находки]
     assert названия == [
         backstage.FINDINGS["обновление"].title,
         backstage.FINDINGS["движок"].title,
     ]
-    assert "плагин" in todoist.created[0]["description"]
+    assert "плагин" in todoist.находки[0]["description"]
 
 
 def test_три_новых_коммита_не_дают_трёх_задач(todoist, monkeypatch):
@@ -250,7 +259,7 @@ def test_три_новых_коммита_не_дают_трёх_задач(todo
     ])
     asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
     asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
-    assert len(todoist.created) == 1, "вторая ночь завела вторую задачу"
+    assert len(todoist.находки) == 1, "вторая ночь завела вторую задачу"
     assert len(todoist.comments) == 1, "вторая ночь должна дописать комментарий"
 
 
@@ -262,7 +271,7 @@ def test_всё_свежее_и_задач_не_появляется(todoist, mo
         versions.Состояние(имя="движок", стоит="2.1.216"),
     ])
     asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
-    assert todoist.created == []
+    assert todoist.находки == []
 
 
 def test_упавшая_сверка_не_роняет_ночной_прогон(todoist, monkeypatch):
@@ -275,7 +284,7 @@ def test_упавшая_сверка_не_роняет_ночной_прогон
 
     monkeypatch.setattr(главный.versions, "проверить", падает)
     asyncio.run(главный.CoachBot._сверить_версии(ТолькоТокен()))
-    assert todoist.created == []
+    assert todoist.находки == []
 
 
 # ── размер задачи и копилка поломок (этап 20) ────────────────────────────────
@@ -289,7 +298,7 @@ def test_у_задачи_есть_метка_размера(todoist):
     бот рисовал себе «без размера 4 из 7» и одновременно занижал загрузку дня.
     """
     asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
-    метки = todoist.created[0]["labels"]
+    метки = todoist.находки[0]["labels"]
     assert "актив" in метки
     assert any(м.startswith("⏱️") for м in метки), "задача снова без размера"
 
@@ -323,7 +332,7 @@ def test_первый_случай_про_повторы_молчит(todoist, t
 
     asyncio.run(backstage.raise_task("t", "ритмы", "файл не читается",
                                      inbox=Inbox(tmp_path / "coach.db")))
-    assert "раз" not in todoist.created[0]["description"].split("Норма")[0][-40:]
+    assert "раз" not in todoist.находки[0]["description"].split("Норма")[0][-40:]
 
 
 def test_обновление_поломкой_не_считается(todoist, tmp_path):
@@ -342,4 +351,55 @@ def test_упавшая_полка_не_отменяет_задачу(todoist, t
             raise sqlite3.OperationalError("database is locked")
 
     asyncio.run(backstage.raise_task("t", "ритмы", "файл не читается", inbox=Сломанная()))
-    assert len(todoist.created) == 1
+    assert len(todoist.находки) == 1
+
+
+# ── общая крыша для технического (просьба владельца 05.08) ───────────────────
+
+
+def test_техническое_становится_подзадачей_крыши(todoist):
+    """Восемь отдельных карточек читались как россыпь дел, хотя дело одно."""
+    asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
+    крыша = [з for з in todoist.created if з["content"] == backstage.КРЫША]
+    подзадача = [з for з in todoist.created if з["content"] == "Поднять версию движка коуча"]
+    assert len(крыша) == 1, "крыша не завелась"
+    assert подзадача and подзадача[0].get("parent_id"), "находка не легла под крышу"
+
+
+def test_у_крыши_нет_ни_даты_ни_метки(todoist):
+    """Дата держала бы её в «сегодня» вечно, а метка без даты — в «Потеряшках»,
+    у которых норма «пусто»: коуч ругался бы на собственную карточку."""
+    asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
+    крыша = [з for з in todoist.created if з["content"] == backstage.КРЫША][0]
+    assert "due_string" not in крыша
+    assert not крыша.get("labels")
+
+
+def test_вторая_находка_крышу_не_дублирует(todoist):
+    asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
+    asyncio.run(backstage.raise_task("t", "ритмы", "файл не читается"))
+    assert len([з for з in todoist.created if з["content"] == backstage.КРЫША]) == 1
+
+
+def test_разговорное_под_крышу_не_идёт(todoist):
+    """Обзор в телеграме и разгребание своих дел — другое место действия."""
+    for повод in ("недельный обзор", "завал", "предложения"):
+        todoist.created.clear()
+        asyncio.run(backstage.raise_task("t", повод, "повод"))
+        assert not any(з["content"] == backstage.КРЫША for з in todoist.created), повод
+        assert not todoist.находки[0].get("parent_id"), повод
+        assert todoist.находки[0].get("project_id"), f"{повод}: потерял проект"
+
+
+def test_подзадаче_место_задаёт_родитель(todoist):
+    """Два указания места у одного факта — два источника правды."""
+    asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
+    подзадача = [з for з in todoist.created if з["content"] == "Поднять версию движка коуча"][0]
+    assert "project_id" not in подзадача
+
+
+def test_готовый_текст_остаётся_в_подзадаче(todoist):
+    """Владелец копирует описание целиком и отправляет — это и чинит беду."""
+    asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
+    подзадача = [з for з in todoist.created if з["content"] == "Поднять версию движка коуча"][0]
+    assert backstage.ШАПКА_АГЕНТУ in подзадача["description"]
