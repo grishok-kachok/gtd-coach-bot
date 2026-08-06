@@ -1152,7 +1152,8 @@ class CoachBot:
         """Обход завалов. Упал — пустой свод и жалоба в лог: чек-ин важнее."""
         try:
             return await detectors.обойти(
-                self.todoist_token, self.snapshot.db_path, self._calendar_config()
+                self.todoist_token, self.snapshot.db_path, self._calendar_config(),
+                полка=self.inbox,
             )
         except Exception:
             log.exception("обход завалов сорвался")

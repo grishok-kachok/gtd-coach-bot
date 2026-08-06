@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-from src import backstage
+from src import backstage, detectors
 
 
 class ПоддельныйTodoist:
@@ -299,8 +299,17 @@ def test_у_задачи_есть_метка_размера(todoist):
     """
     asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
     метки = todoist.находки[0]["labels"]
-    assert "актив" in метки
     assert any(м.startswith("⏱️") for м in метки), "задача снова без размера"
+
+
+def test_у_задачи_бота_нет_метки_состояния(todoist):
+    """Срок сильнее метки (этап 21): у задачи бота есть `due_string`, значит
+    метке состояния там не место. Раньше бот вешал `актив` и сам себе рисовал
+    отклонение «срок и метка» на каждой ночной находке."""
+    asyncio.run(backstage.raise_task("t", "движок", "вышла 2.1.222"))
+    метки = todoist.находки[0]["labels"]
+    assert not (set(метки) & set(detectors.СОСТОЯНИЯ)), f"метка состояния: {метки}"
+    assert todoist.находки[0]["due_string"], "срок обязан быть — на нём всё держится"
 
 
 def test_размер_по_вкладу_человека_а_не_по_объёму(todoist):

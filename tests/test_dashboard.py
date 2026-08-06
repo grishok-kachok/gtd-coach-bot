@@ -16,16 +16,20 @@ from pathlib import Path
 
 import pytest
 
-from src import dashboard
+from src import dashboard, detectors
 
 
 ВНЕШНЕЕ = re.compile(r"https?://|<script\s+src|<link\s|@import|src=[\"']//")
 
 
 class ПоддельныйTodoist:
-    def __init__(self, labels=None, tasks=None):
+    def __init__(self, labels=None, tasks=None, все=None, проекты=None):
         self.labels = labels or []
         self.tasks = tasks or {}
+        # «Потеряшки» и «В игре» фильтром не выражаются — им нужен весь список
+        # задач, чтобы увидеть подзадачи. Поэтому у подделки два входа.
+        self.все = все or []
+        self.проекты = проекты or []
 
     def __call__(self, token):
         return self
@@ -37,13 +41,17 @@ class ПоддельныйTodoist:
         return False
 
     async def get_paginated(self, path, params=None, key="results", cap=300):
+        # Приборы спрашивают проекты, чтобы спрятать «Архив» (этап 21).
+        if path == "/projects":
+            return self.проекты
         assert path == "/tasks"
-        return [
+        по_целям = [
             {"id": f"t{i}", "content": з.get("content", ""), "labels": [м],
              "due": з.get("due")}
             for м, задачи in self.tasks.items() if м.startswith("@цель-")
             for i, з in enumerate(задачи)
         ]
+        return [*по_целям, *self.все]
 
     async def get(self, path, params=None):
         assert path == "/tasks/filter"
@@ -136,13 +144,30 @@ def test_сломанный_ямл_не_роняет_страницу(мозг, 
 
 
 def test_приборы_показывают_норму_и_факт(мозг, monkeypatch):
-    todoist = ПоддельныйTodoist(tasks={"@актив & no date": [{"content": "потеряшка"}]})
+    """Потеряшка — бессрочное дело без метки состояния (этап 21), и считается
+    она по всему списку задач, а не фильтром: фильтр не видит подзадач."""
+    todoist = ПоддельныйTodoist(все=[
+        {"id": "x", "content": "потеряшка", "labels": [], "due": None, "parent_id": None},
+    ])
     данные = собрать(мозг, todoist, monkeypatch)
     страница = dashboard.нарисовать(данные, date(2026, 8, 1))
 
     приборы = dict((имя, факт) for имя, факт, _ in данные.приборы)
     assert приборы["Потеряшки"] == 1 and приборы["Inbox"] == 0
+    assert приборы["В игре"] == 0
     assert "красная" in страница and "зелёная" in страница
+
+
+def test_дашборд_и_обход_считают_потеряшек_одинаково(мозг, monkeypatch):
+    """Два отбора одного прибора разошлись бы через месяц — отбор один."""
+    задачи = [
+        {"id": "a", "content": "потеряшка", "labels": [], "due": None, "parent_id": None},
+        {"id": "b", "content": "складская", "labels": ["когда-нибудь"], "due": None,
+         "parent_id": None},
+    ]
+    данные = собрать(мозг, ПоддельныйTodoist(все=задачи), monkeypatch)
+    приборы = dict((имя, факт) for имя, факт, _ in данные.приборы)
+    assert приборы["Потеряшки"] == len(detectors.потеряшки_список(задачи)) == 1
 
 
 def test_файл_называется_по_дате(мозг, monkeypatch, tmp_path):
@@ -251,12 +276,14 @@ def test_одиночный_перенос_не_рвёт_предложение(
 
 
 def test_работа_по_цели_это_карточка_плюс_подзадачи(мозг, monkeypatch):
-    """Метка на подзадачи не наследуется, а карточка-замысел по методологии
+    """Метка на подзадачи не наследуется, а большая задача по методологии
     без даты. Считать только помеченное — значит объявить спящей цель «Лиссабон»
     с тридцатью задачами (проверено на живом аккаунте 31.07)."""
 
     class Todoist(ПоддельныйTodoist):
         async def get_paginated(self, path, params=None, key="results", cap=300):
+            if path == "/projects":
+                return []
             assert path == "/tasks"
             return [
                 {"id": "к", "content": "* ✈️ Лиссабон", "labels": ["цель-лиссабон"], "due": None},
@@ -289,3 +316,19 @@ def test_спящей_считается_цель_без_единой_даты(�
     assert данные.цели[0]["с_датой"] == 0
     assert dict((и, ф) for и, ф, _ in данные.приборы)["Спящие цели"] == 1
     assert "— спит" in dashboard.нарисовать(данные, date(2026, 8, 1))
+
+
+def test_дашборд_прячет_архив_так_же_как_обход(мозг, monkeypatch):
+    """Два места, где считаются потеряшки, обязаны прятать одно и то же."""
+    todoist = ПоддельныйTodoist(
+        проекты=[{"id": "арх", "name": "Архив"}, {"id": "жив", "name": "Личное"}],
+        все=[
+            {"id": "a", "content": "живая потеряшка", "labels": [], "due": None,
+             "parent_id": None, "project_id": "жив"},
+            {"id": "b", "content": "мусор из архива", "labels": [], "due": None,
+             "parent_id": None, "project_id": "арх"},
+        ],
+    )
+    данные = собрать(мозг, todoist, monkeypatch)
+    приборы = dict((имя, факт) for имя, факт, _ in данные.приборы)
+    assert приборы["Потеряшки"] == 1, "архивный мусор попал в потеряшки"
