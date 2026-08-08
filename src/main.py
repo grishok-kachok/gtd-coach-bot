@@ -1194,6 +1194,7 @@ class CoachBot:
             return await detectors.обойти(
                 self.todoist_token, self.snapshot.db_path, self._calendar_config(),
                 полка=self.inbox,
+                горизонты=self.brain_dir / "память" / "состояние" / "горизонты.md",
             )
         except Exception:
             log.exception("обход завалов сорвался")

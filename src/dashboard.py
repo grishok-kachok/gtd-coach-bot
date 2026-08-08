@@ -45,7 +45,8 @@ from .detectors import (  # noqa: F401
     видимые,
     по_фильтру as _счёт,
     потеряшки_список,
-    цели as _цели,
+    СФЕРЫ,
+    без_сферы_список,
 )
 
 log = logging.getLogger(__name__)
@@ -61,8 +62,8 @@ class Данные:
     миссия: str = ""
     черновики: list[str] = field(default_factory=list)
     горизонты: dict[str, str] = field(default_factory=dict)
-    цели: list[dict] = field(default_factory=list)
     колесо: list[tuple[str, dict]] = field(default_factory=list)
+    сферы: list[tuple[str, int]] = field(default_factory=list)
     приборы: list[tuple[str, int, str]] = field(default_factory=list)
     период: dict[str, int] = field(default_factory=dict)
 
@@ -168,6 +169,28 @@ def _период(db_path: Path, дней: int) -> dict[str, int]:
     return {"закрыто": строка[0] if строка else 0, "дней": дней}
 
 
+def _по_сферам(db_path: Path, дней: int) -> list[tuple[str, int]]:
+    """Сколько дел закрыто по каждой сфере. Порядок — как в `СФЕРЫ`, всегда
+    все шесть: сфера с нулём — это тоже показание, и как раз самое говорящее."""
+    счёт = {с: 0 for с in СФЕРЫ}
+    if not db_path.exists():
+        return list(счёт.items())
+    порог = (date.today() - timedelta(days=дней)).isoformat()
+    try:
+        with sqlite3.connect(db_path) as db:
+            строки = db.execute(
+                "SELECT labels FROM todoist_closed WHERE completed_at >= ?", (порог,)
+            ).fetchall()
+    except sqlite3.Error as err:
+        log.warning("закрытые по сферам не читаются: %s", err)
+        return list(счёт.items())
+    for (метки,) in строки:
+        for м in (метки or "").split(","):
+            if м in счёт:
+                счёт[м] += 1
+    return list(счёт.items())
+
+
 # ── сборка данных ────────────────────────────────────────────────────────────
 
 async def собрать(brain_dir: Path, db_path: Path, token: str, дней: int = 7) -> Данные:
@@ -185,19 +208,13 @@ async def собрать(brain_dir: Path, db_path: Path, token: str, дней: i
         горизонты=_горизонты(память / "состояние" / "горизонты.md"),
         колесо=_колесо(память / "журнал" / "колесо-баланса.md"),
         период=_период(db_path, дней),
+        сферы=_по_сферам(db_path, дней),
     )
     try:
         async with TodoistClient(token) as client:
-            данные.цели = await _цели(client)
             приборы = [
                 (имя, len(await _счёт(client, запрос)), норма) for имя, запрос, норма in GAUGES
             ]
-            # «Спящие цели» одним фильтром Todoist не выражается: метка висит
-            # на карточке, а даты — у её подзадач. Запрос «@цель* & no date»
-            # считал бы сами карточки и объявил спящей цель с тридцатью
-            # задачами и сроками. Считаем по собранной работе.
-            спящих = sum(1 for ц in данные.цели if ц["с_датой"] == 0)
-
             # «Потеряшки» и «В игре» фильтром тоже не выражаются: обоим нужно
             # знать, есть ли у задачи подзадачи, а такого условия в языке
             # запросов Todoist нет. Тянем все задачи один раз и считаем кодом —
@@ -211,7 +228,7 @@ async def собрать(brain_dir: Path, db_path: Path, token: str, дней: i
             данные.приборы = [
                 ("Потеряшки", потеряшек, "пусто"),
                 ("В игре", ведём, f"не больше {В_ИГРЕ_НОРМА}"),
-                ("Спящие цели", спящих, "пусто"),
+                ("Без сферы", len(без_сферы_список(все)), "0"),
                 *приборы,
             ]
     except (TodoistError, OSError) as err:
@@ -329,22 +346,33 @@ def _линия(ряды: list[tuple[str, dict]]) -> str:
     return f'<table class="ряд"><thead><tr><th>месяц</th>{шапка}</tr></thead><tbody>{строки}</tbody></table>'
 
 
-def _цели_html(цели: list[dict]) -> str:
-    if not цели:
-        return '<p class="пусто">Меток @цель-* в Todoist ещё нет — работа со стратегией не размечена.</p>'
-    строки = ""
-    for ц in цели:
-        спит = ц["с_датой"] == 0
-        строки += (
-            f'<tr class="{"тревога" if спит else ""}">'
-            f'<th>{_э(ц["имя"])}</th>'
-            f'<td>{ц["всего"]}</td><td>{ц["с_датой"]}</td>'
-            f'<td>{_э(ц["ближайший"]) or "— спит"}</td></tr>'
-        )
-    return (
-        '<table><thead><tr><th>цель</th><th>карточек</th><th>с датой</th>'
-        f'<th>ближайший шаг</th></tr></thead><tbody>{строки}</tbody></table>'
+def _сферы_html(ряды: list[tuple[str, int]], дней: int) -> str:
+    """Дела по сферам за месяц — полосками, теми же словами, что и колесо.
+
+    **Стоит рядом с колесом намеренно.** Колесо мерит самочувствие, полоски —
+    факт, и предмет разговора на стратсессии — расхождение этих двух картинок:
+    «семья на тройку, а закрыто ноль дел». Раньше сравнивать было нечего:
+    списка сфер было два, и они не пересекались ни одним словом.
+
+    Оценки колеса из фактов НЕ считаются и считаться не будут: не у каждой
+    сферы много дел, а «здоровье на двойку» человек знает про себя сам.
+    """
+    если_пусто = (
+        f'<p class="пусто">За {дней} дн. ни одна закрытая задача не носила метку '
+        f'сферы. Метки заведены 08.08.2026 — картинка наполнится за месяц, '
+        f'потому что считает она закрытое, а закрытое до этого дня меток не знало.</p>'
     )
+    if not ряды or not any(n for _, n in ряды):
+        return если_пусто
+    макс = max(n for _, n in ряды) or 1
+    полосы = "".join(
+        f'<tr><th>{_э(имя)}</th>'
+        f'<td class="полоса"><span style="width:{100 * n / макс:.0f}%"></span></td>'
+        f'<td class="число">{n}</td></tr>'
+        for имя, n in ряды
+    )
+    return f'<table class="сферы"><tbody>{полосы}</tbody></table>'
+
 
 
 def _приборы_html(приборы: list[tuple[str, int, str]]) -> str:
@@ -409,6 +437,11 @@ tr.тревога td, tr.тревога th { color:var(--тревога); }
 .фигура { fill:var(--акцент); fill-opacity:.28; stroke:var(--акцент); stroke-width:2; }
 .подпись { font-size:9px; fill:var(--текст); }
 footer { color:var(--тихий); font-size:12px; margin-top:22px; }
+table.сферы { width:100%; }
+table.сферы th { text-align:left; white-space:nowrap; padding-right:10px; font-weight:600; }
+td.полоса { width:100%; }
+td.полоса span { display:block; height:14px; border-radius:7px; background:var(--акцент); min-width:2px; }
+td.число { text-align:right; padding-left:8px; font-variant-numeric:tabular-nums; }
 """
 
 
@@ -439,10 +472,11 @@ def нарисовать(данные: Данные, день: date) -> str:
 
 <section><h2>Горизонты</h2>{горизонты}</section>
 
-<section><h2>Работа по целям</h2><div class="обёртка">{_цели_html(данные.цели)}</div></section>
-
-<section><h2>Колесо баланса</h2>{_колесо_svg(данные.колесо)}
+<section><h2>Колесо баланса — самочувствие</h2>{_колесо_svg(данные.колесо)}
 <div class="обёртка">{_линия(данные.колесо)}</div></section>
+
+<section><h2>Дела по сферам — факт за {данные.период.get('дней', 30)} дн.</h2>
+{_сферы_html(данные.сферы, данные.период.get('дней', 30))}</section>
 
 <section><h2>Приборы</h2>{_приборы_html(данные.приборы)}</section>
 

@@ -45,13 +45,7 @@ class ПоддельныйTodoist:
         if path == "/projects":
             return self.проекты
         assert path == "/tasks"
-        по_целям = [
-            {"id": f"t{i}", "content": з.get("content", ""), "labels": [м],
-             "due": з.get("due")}
-            for м, задачи in self.tasks.items() if м.startswith("@цель-")
-            for i, з in enumerate(задачи)
-        ]
-        return [*по_целям, *self.все]
+        return list(self.все)
 
     async def get(self, path, params=None):
         assert path == "/tasks/filter"
@@ -162,7 +156,7 @@ def test_дашборд_и_обход_считают_потеряшек_один
     """Два отбора одного прибора разошлись бы через месяц — отбор один."""
     задачи = [
         {"id": "a", "content": "потеряшка", "labels": [], "due": None, "parent_id": None},
-        {"id": "b", "content": "складская", "labels": ["когда-нибудь"], "due": None,
+        {"id": "b", "content": "жду ответа", "labels": ["жду"], "due": None,
          "parent_id": None},
     ]
     данные = собрать(мозг, ПоддельныйTodoist(все=задачи), monkeypatch)
@@ -275,47 +269,31 @@ def test_одиночный_перенос_не_рвёт_предложение(
     assert "<br>" not in страница
 
 
-def test_работа_по_цели_это_карточка_плюс_подзадачи(мозг, monkeypatch):
-    """Метка на подзадачи не наследуется, а большая задача по методологии
-    без даты. Считать только помеченное — значит объявить спящей цель «Лиссабон»
-    с тридцатью задачами (проверено на живом аккаунте 31.07)."""
+def test_прибор_без_сферы_считает_тем_же_кодом(мозг, monkeypatch):
+    """Панель и ночной обход обязаны показывать одно число: считает их
+    одна функция, а не две похожие."""
 
     class Todoist(ПоддельныйTodoist):
         async def get_paginated(self, path, params=None, key="results", cap=300):
             if path == "/projects":
                 return []
-            assert path == "/tasks"
             return [
-                {"id": "к", "content": "* ✈️ Лиссабон", "labels": ["цель-лиссабон"], "due": None},
-                {"id": "п1", "content": "Визы", "parent_id": "к", "labels": [],
-                 "due": {"date": "2026-09-01"}},
-                {"id": "в1", "content": "Фото на визу", "parent_id": "п1", "labels": [],
-                 "due": {"date": "2026-08-20"}},
-                {"id": "чужая", "content": "Купить лампочку", "labels": [], "due": None},
+                {"id": "a", "content": "голая", "labels": [], "due": None},
+                {"id": "b", "content": "одетая", "labels": ["☸️быт"], "due": None},
             ]
 
     данные = собрать(мозг, Todoist(), monkeypatch)
-    assert данные.цели == [
-        {"имя": "лиссабон", "всего": 3, "с_датой": 2, "ближайший": "2026-08-20"}
-    ]
+    assert dict((и, ф) for и, ф, _ in данные.приборы)["Без сферы"] == 1
 
+
+def test_дела_по_сферам_рисуются_рядом_с_колесом(мозг, monkeypatch):
+    """Предмет разговора на стратсессии — расхождение самочувствия и факта,
+    а увидеть его можно только рядом."""
+    данные = собрать(мозг, ПоддельныйTodoist(), monkeypatch)
     страница = dashboard.нарисовать(данные, date(2026, 8, 1))
-    assert "— спит" not in страница, "цель с датами не может быть спящей"
-    assert dict((и, ф) for и, ф, _ in данные.приборы)["Спящие цели"] == 0
-
-
-def test_спящей_считается_цель_без_единой_даты(мозг, monkeypatch):
-    class Todoist(ПоддельныйTodoist):
-        async def get_paginated(self, path, params=None, key="results", cap=300):
-            return [
-                {"id": "к", "content": "* 🚀 6 поток", "labels": ["цель-6поток"], "due": None},
-                {"id": "п", "content": "Программа", "parent_id": "к", "labels": [], "due": None},
-            ]
-
-    данные = собрать(мозг, Todoist(), monkeypatch)
-    assert данные.цели[0]["с_датой"] == 0
-    assert dict((и, ф) for и, ф, _ in данные.приборы)["Спящие цели"] == 1
-    assert "— спит" in dashboard.нарисовать(данные, date(2026, 8, 1))
+    assert "Колесо баланса — самочувствие" in страница
+    assert "Дела по сферам" in страница
+    assert "Работа по целям" not in страница, "мёртвый блок целей снят"
 
 
 def test_дашборд_прячет_архив_так_же_как_обход(мозг, monkeypatch):
