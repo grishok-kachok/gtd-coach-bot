@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -34,6 +35,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import median
 from zoneinfo import ZoneInfo
+
+from .detectors import день_сессии
 
 log = logging.getLogger(__name__)
 
@@ -194,6 +197,29 @@ def что_делается(db: sqlite3.Connection, окно: int = 30,
 
 # ── показатели по снимкам: заговорят, когда накопятся ────────────────────────
 
+def _дней_сессий(комментарии: str | None) -> int:
+    """Сколько РАЗНЫХ дней человек отчитался, что работал над задачей.
+
+    Комментарии лежат в снимке JSON-списком строк (`todoist_snapshot.py`).
+    Разбирает их `detectors.день_сессии` — тот же разборщик, что у хроник:
+    формат записи сессии обязан пониматься одинаково в обоих местах, а два
+    разборщика одного формата расходятся всегда.
+
+    Дни считаются уникальными: два комментария за один день — это один день
+    работы и один законный перенос, а не два.
+    """
+    if not комментарии:
+        return 0
+    try:
+        строки = json.loads(комментарии)
+    except (TypeError, ValueError):
+        return 0
+    if not isinstance(строки, list):
+        return 0
+    дни = {д for д in (день_сессии(str(с)) for с in строки) if д}
+    return len(дни)
+
+
 def переносы(db: sqlite3.Connection, окно: int = 90,
              сегодня: date | None = None) -> Показатель | None:
     """Сколько раз задача переезжает, прежде чем случиться.
@@ -202,12 +228,27 @@ def переносы(db: sqlite3.Connection, окно: int = 90,
     с первого дня, а не через две недели накопления снимков. Медиана, а не
     среднее: одна задача с двадцатью переносами не должна рассказывать
     про обычную.
+
+    **Дни рабочих сессий вычитаются, и без этого показатель врал.** Сказал
+    «работал три часа, продолжу завтра» — коуч двигает срок, и Todoist считает
+    это переносом. Три дня честной работы превращали задачу в «переехавшую
+    трижды», то есть в кандидата на «дроби или отпускай». Уклонение и работа
+    выглядели одинаково — а показатель заводился ровно чтобы их различать.
+    Хроники это учли ещё 06.08.2026 (`detectors.хронические_переносы`), профиль
+    остался считать по-старому: правило починили в одном доме из двух.
+
+    Комментарии брать неоткуда не надо — ночной снимок `todoist_tasks` хранит
+    их у каждой задачи. Берём последний снимок задачи перед закрытием, то есть
+    самый полный.
     """
     строки = db.execute(
-        "SELECT postponed FROM todoist_closed WHERE completed_at >= ?",
+        "SELECT c.postponed,"
+        "       (SELECT t.comments FROM todoist_tasks t"
+        "         WHERE t.task_id = c.task_id ORDER BY t.day DESC LIMIT 1)"
+        "  FROM todoist_closed c WHERE c.completed_at >= ?",
         (_порог(окно, сегодня),),
     ).fetchall()
-    числа = [n or 0 for (n,) in строки]
+    числа = [max(0, (n or 0) - _дней_сессий(комментарии)) for n, комментарии in строки]
     if not числа:
         return None
     сразу = sum(1 for n in числа if n == 0)
