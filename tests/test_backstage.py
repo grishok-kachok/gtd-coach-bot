@@ -38,10 +38,21 @@ class ПоддельныйTodoist:
             # Перебор, а не поиск: `search:` у Todoist не находит только что
             # созданную задачу (прогон 02.08.2026), и правило «одна задача
             # на копилку» ломалось молча.
-            return {"results": list(self.tasks)}
+            #
+            # Закрытые не отдаём: живой `/tasks` возвращает только открытые.
+            # Подделка, которая отдаёт закрытые, врёт в удобную сторону —
+            # и тест на закрытую крышу проходил бы по неверной причине.
+            return {"results": [з for з in self.tasks if not з.get("checked")]}
         if path == "/tasks/filter":
             raise AssertionError(
                 "backstage снова ищет поиском — он врёт на свежих задачах")
+        if path.startswith("/tasks/"):
+            нужен = path.rsplit("/", 1)[-1]
+            for з in self.tasks:
+                if str(з.get("id")) == нужен:
+                    return з
+            from todoist_mcp.client import TodoistError
+            raise TodoistError(f"404 нет задачи {нужен}")
         raise AssertionError(f"неожиданный GET {path}")
 
     @property
@@ -61,9 +72,12 @@ class ПоддельныйTodoist:
 
 
 @pytest.fixture
-def todoist(monkeypatch):
+def todoist(monkeypatch, tmp_path):
     поддельный = ПоддельныйTodoist()
     monkeypatch.setattr(backstage, "TodoistClient", поддельный)
+    # Память о крыше — во временную папку, а не в боевой /state: тест, который
+    # пишет в настоящее состояние бота, однажды сотрёт его на живой машине.
+    monkeypatch.setattr(backstage, "КРЫША_ФАЙЛ", tmp_path / "крыша_id")
     return поддельный
 
 
@@ -519,3 +533,79 @@ def test_описание_начинается_с_сути_а_не_с_шабло
         начало = backstage.описание(f, "находка").strip().lower()
         for шаблон in ШАБЛОНЫ:
             assert not начало.startswith(шаблон), f"«{ключ}» начинается с шаблона «{шаблон}»"
+
+
+# ── крыша узнаётся по id, а не по имени (поймано вживую 09.08.2026) ──────────
+#
+# Владелец 08.08 удалил крышу руками и слил подзадачи в свою карточку. Ночь
+# не нашла своего имени и завела крышу заново: две крыши на одно дело, один
+# и тот же баг записан дважды. Связка по имени разъезжается на первом же
+# переименовании — тот же класс, что связка «цель ↔ карточка».
+
+
+def test_переименованная_крыша_узнаётся_по_id(todoist):
+    """Главное свойство правки: имя поменяли — вторая крыша НЕ заводится."""
+    todoist.tasks.append({"id": "крыша1", "content": backstage.КРЫША})
+    asyncio.run(backstage.raise_task("токен", "промахи", "первая ночь"))
+
+    свои = [з["id"] for з in todoist.tasks if з["content"] == backstage.КРЫША]
+    todoist.tasks = [
+        ({**з, "content": "* 🤖 Доработки плагина"} if з["id"] in свои else з)
+        for з in todoist.tasks
+    ]
+    todoist.created.clear()
+
+    asyncio.run(backstage.raise_task("токен", "оглавление", "вторая ночь"))
+    заведённые_крыши = [з for з in todoist.created if з["content"] == backstage.КРЫША]
+    assert заведённые_крыши == [], "крыша завелась заново, хотя её просто переименовали"
+
+
+def test_id_крыши_переживает_перезапуск(todoist):
+    """Файл в /state — тот же том, что и закладка разговора."""
+    asyncio.run(backstage.raise_task("токен", "промахи", "ночь"))
+    assert backstage._запомненная_крыша(), "id крыши не записан — после рестарта забудем"
+
+
+def test_удалённая_крыша_заводится_заново(todoist):
+    """Помним id, а карточки нет: не молчим и не падаем — заводим новую."""
+    backstage._запомнить_крышу("призрак")
+    asyncio.run(backstage.raise_task("токен", "промахи", "ночь"))
+    assert [з for з in todoist.created if з["content"] == backstage.КРЫША], \
+        "крыша по мёртвому id не воскресла — находке некуда лечь"
+    assert backstage._запомненная_крыша() != "призрак"
+
+
+def test_старая_крыша_подхватывается_по_имени_один_раз(todoist):
+    """Миграция для тех, у кого крыша уже есть, а файла с id ещё нет."""
+    todoist.tasks.append({"id": "старая", "content": backstage.КРЫША})
+    asyncio.run(backstage.raise_task("токен", "промахи", "ночь"))
+    assert backstage._запомненная_крыша() == "старая"
+    assert [з for з in todoist.created if з["content"] == backstage.КРЫША] == []
+
+
+def test_имя_крыши_можно_задать_своё():
+    """Ученик называет карточку по-своему, не трогая код."""
+    import importlib
+    import os
+    os.environ["BACKSTAGE_ROOF"] = "🛠 Мои доработки"
+    try:
+        свежий = importlib.reload(backstage)
+        assert свежий.КРЫША == "🛠 Мои доработки"
+    finally:
+        del os.environ["BACKSTAGE_ROOF"]
+        importlib.reload(backstage)
+
+
+def test_закрытая_крыша_не_считается_живой(todoist):
+    """Карточка существует, но её закрыли — подзадача под закрытой крышей
+    невидима. Это отдельный случай от «удалили»: там Todoist отвечает 404,
+    а тут отдаёт задачу, и отличить можно только по `checked`.
+
+    Пойман мутацией: проверка на 404 закрывала оба случая по виду, а на деле
+    только один — и второй не падал ни на одном тесте.
+    """
+    todoist.tasks.append({"id": "закрытая", "content": backstage.КРЫША, "checked": True})
+    backstage._запомнить_крышу("закрытая")
+    asyncio.run(backstage.raise_task("токен", "промахи", "ночь"))
+    assert [з for з in todoist.created if з["content"] == backstage.КРЫША], \
+        "находка легла под закрытую крышу — там её никто не увидит"
