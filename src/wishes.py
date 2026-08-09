@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from .backstage import raise_task
+from .backstage import raise_wish
 from .inbox import ЗАЯВКА, Inbox
 
 log = logging.getLogger(__name__)
@@ -54,15 +54,28 @@ def build_wishes_server(inbox: Inbox, todoist_token: str = "", tz: str = "Europe
 
         today: date = datetime.now(ZoneInfo(tz)).date()
         try:
-            await asyncio.to_thread(inbox.положить, ЗАЯВКА, what, зачем=why, день=today)
+            номер = await asyncio.to_thread(inbox.положить, ЗАЯВКА, what, зачем=why, день=today)
         except (sqlite3.Error, ValueError):
             log.exception("не смог записать заявку")
             return {"content": [{"type": "text", "text": "Не смог записать заявку — скажи об этом вслух."}]}
 
         # Копилка, в которую не заглядывают, — свалка. Дёргаем за рукав задачей
-        # с датой: одна на копилку, а не на каждую заявку.
-        if todoist_token:
-            await raise_task(todoist_token, "заявка", f"{today.isoformat()}: «{what}».")
+        # с датой — и у КАЖДОЙ заявки она своя.
+        #
+        # Правило «одна задача на копилку, а не на каждую находку» остаётся
+        # в силе для машинных приборов и здесь не действует. Решение владельца
+        # 09.08.2026: «каждая заявка человека — отдельная карточка; всё, что
+        # делает автоматика, — просто отметка, что есть проблема».
+        #
+        # Граница проходит по источнику, а не по важности. Прибор находит одно
+        # и то же каждую ночь — карточка на находку превратила бы Todoist
+        # в ленту повторов (так умерли семь карточек-маяков). Заявки диктует
+        # человек, повторов у них не бывает: три штуки за день уже много.
+        #
+        # Цену прежнего порядка увидели в тот же день: три заявки лежали одной
+        # карточкой, две разобрали — а закрыть было нечего, карточка висела.
+        if todoist_token and номер:
+            await raise_wish(todoist_token, номер, what)
 
         log.info("заявка записана: %s", what[:80])
         return {"content": [{"type": "text", "text": (
