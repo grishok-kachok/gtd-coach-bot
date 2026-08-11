@@ -13,7 +13,9 @@ FROM python:3.12-slim
 # 09.08.2026: 2.1.222 → 2.1.226. Ночная сверка звала трижды (223, 224, 226),
 # задача копила находки комментариями и ждала человека — порядок сработал
 # ровно так, как задуман.
-ARG CLAUDE_CODE_VERSION=2.1.226
+# 11.08.2026: 2.1.226 → 2.1.227. Ночная сверка позвала, человек решил поднимать
+# в разборе завалов — снова отдельный коммит, а не побочный эффект сборки.
+ARG CLAUDE_CODE_VERSION=2.1.227
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates curl gnupg openssh-client \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
