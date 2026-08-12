@@ -1200,8 +1200,7 @@ class CoachBot:
             log.exception("обход завалов сорвался")
             return detectors.Свод()
 
-    @staticmethod
-    def _with_brief(prompt: str, свод: detectors.Свод) -> str:
+    def _with_brief(self, prompt: str, свод: detectors.Свод) -> str:
         """Подложить свод к чек-ину. Пусто — не подкладываем ничего.
 
         Подстановка, а не просьба «посмотри завалы» в тексте: просьба
