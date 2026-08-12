@@ -453,6 +453,7 @@ class CoachBot:
         channel: str = "text",
         archived_as: str | None = None,
         из_команды: bool = False,
+        сочинил_код: bool = False,
     ) -> None:
         """Отдать реплику движку и ответить владельцу.
 
@@ -464,7 +465,7 @@ class CoachBot:
             # Обряд включает и выключает КОД, а не память модели: «включи»
             # обязано случаться. Под замком, как и всё остальное: перекладывание
             # закладок посреди чужого ответа увело бы разговор не туда.
-            мостик = await self._переключить_обряд(text, context, из_команды)
+            мостик = await self._переключить_обряд(text, context, из_команды, сочинил_код)
             # Метку берём ПОСЛЕ переключения: реплика «проведём недельную»
             # уже принадлежит стратсессии, которую сама и открыла, а «закончить»
             # — уже обычному разговору. Иначе у каждой стратсессии в архиве
@@ -547,12 +548,19 @@ class CoachBot:
         return f"{значок} Идёт стратсессия. Выйти — /end" if self.engine.обряд else значок
 
     async def _переключить_обряд(self, text: str, context: ContextTypes.DEFAULT_TYPE,
-                                 из_команды: bool = False) -> str:
+                                 из_команды: bool = False,
+                                 сочинил_код: bool = False) -> str:
         """Начать или закончить стратсессию. Возвращает мостик в новый заход.
 
         **Включает только команда** (`из_команды=True`), то есть нажатие в меню
         или слэш. Те же слова, сказанные в разговоре, обряд не включают —
         коуч лишь подсказывает команду.
+
+        **Служебный текст (`сочинил_код=True`) не смотрим вовсе.** Чек-ин и
+        дожим человек не произносил: их сочинил код, и внутри лежит свод завалов
+        с НАЗВАНИЯМИ задач Todoist. Куплено 12.08.2026: карточка «Провести
+        недельную стратсессию» без метки сферы попала в свод — и утренний
+        чек-ин вместо главного дела дня прислал подсказку «жми /week».
 
         Разводить пришлось потому, что команда меню не имеет своей логики:
         `/week` печатает за человека фразу «Проведём недельную стратсессию»,
@@ -566,6 +574,9 @@ class CoachBot:
         с каждой репликой. Здесь этой возможностью и пользуемся, чтобы нить
         не рвалась: человек продолжает разговор, а не начинает знакомство.
         """
+        if сочинил_код:
+            return ""
+
         if rituals.конец_ли(text):
             return await self._закончить_обряд(context)
 
@@ -1169,7 +1180,8 @@ class CoachBot:
                     что=повод.вин, повод=self._словами(now, повод),
                 )
         sent_at = now.isoformat(timespec="seconds")
-        await self._think_and_reply(prompt, self.owner_id, context, channel=channel)
+        await self._think_and_reply(prompt, self.owner_id, context, channel=channel,
+                                    сочинил_код=True)
         self._schedule_followup(context, sent_at, attempt=1)
 
     @staticmethod
@@ -1243,7 +1255,8 @@ class CoachBot:
         if attempt > len(attempts):  # промпт убрали из плагина, пока дожим ждал в очереди
             return
         await self._think_and_reply(
-            attempts[attempt - 1].text, self.owner_id, context, channel="nudge"
+            attempts[attempt - 1].text, self.owner_id, context, channel="nudge",
+            сочинил_код=True,
         )
         self._schedule_followup(context, sent_at, attempt + 1)
 
