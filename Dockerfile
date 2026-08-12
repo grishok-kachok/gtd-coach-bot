@@ -15,7 +15,7 @@ FROM python:3.12-slim
 # ровно так, как задуман.
 # 11.08.2026: 2.1.226 → 2.1.227. Ночная сверка позвала, человек решил поднимать
 # в разборе завалов — снова отдельный коммит, а не побочный эффект сборки.
-ARG CLAUDE_CODE_VERSION=2.1.227
+ARG CLAUDE_CODE_VERSION=2.1.228
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates curl gnupg openssh-client \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
