@@ -89,10 +89,17 @@ CREATE TABLE IF NOT EXISTS inbox (
     статус     TEXT NOT NULL DEFAULT 'новая',
     итог       TEXT NOT NULL DEFAULT '',  -- чем кончилось; у закрытой обязателен
     разобрано  TEXT NOT NULL DEFAULT '',  -- день разбора
-    вернуться  TEXT NOT NULL DEFAULT ''   -- у отложенной обязателен: «потом» без числа — «никогда»
+    вернуться  TEXT NOT NULL DEFAULT '',  -- у отложенной обязателен: «потом» без числа — «никогда»
+    карточка   TEXT NOT NULL DEFAULT ''   -- id карточки Todoist, пока она жива
 );
 CREATE INDEX IF NOT EXISTS inbox_вид ON inbox(вид, статус);
 """
+
+# Колонки, дописанные к уже живой базе. Пересоздать таблицу нельзя: в ней лежат
+# все входящие с 05.08.2026, и это единственный экземпляр.
+ДОПИСАННЫЕ = (
+    ("карточка", "TEXT NOT NULL DEFAULT ''"),
+)
 
 
 def _сегодня() -> date:
@@ -112,6 +119,22 @@ class Inbox:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.executescript(СХЕМА)
+            self._дописать_колонки(db)
+
+    @staticmethod
+    def _дописать_колонки(db: sqlite3.Connection) -> None:
+        """Довести старую базу до нынешней схемы.
+
+        `CREATE TABLE IF NOT EXISTS` молчит о таблице, которая уже есть, — новая
+        колонка в тексте схемы до живой базы не доедет, и код упадёт на первом же
+        запросе к ней. Проверяем по факту, а не по номеру версии: номер тоже надо
+        где-то хранить, и он врёт ровно тогда, когда его забыли поднять.
+        """
+        есть = {строка[1] for строка in db.execute("PRAGMA table_info(inbox)")}
+        for имя, тип in ДОПИСАННЫЕ:
+            if имя not in есть:
+                db.execute(f"ALTER TABLE inbox ADD COLUMN {имя} {тип}")
+                log.info("полка: дописана колонка «%s»", имя)
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=30)
@@ -172,10 +195,46 @@ class Inbox:
         запись = self.запись(id_)
         return int(запись["случаев"]) if запись else 1
 
+    def запомнить_карточку(self, id_: int, карточка: str) -> bool:
+        """Связать запись с карточкой Todoist, которую под неё завели.
+
+        Без этой связи закрытие записи не гасит карточку, и та висит, пока
+        кто-нибудь не вспомнит руками. 13.08.2026 не вспомнил никто: заявка #129
+        была сделана и закрыта, а её карточка досталась владельцу — он и заметил.
+        Пять предыдущих раз пронесло только потому, что закрывали в тот же час.
+        """
+        карточка = (карточка or "").strip()
+        if not карточка:
+            return False
+        with self._connect() as db:
+            cur = db.execute("UPDATE inbox SET карточка=? WHERE id=?", (карточка, id_))
+            return cur.rowcount > 0
+
+    def непогашенные(self, limit: int = 50) -> list[dict]:
+        """Закрытые записи, чья карточка в Todoist ещё жива.
+
+        Список для того, кто умеет ходить в сеть. Сама полка в Todoist не ходит
+        намеренно: это слой базы, и синхронный SQL не место для сетевого запроса,
+        который может висеть тридцать секунд.
+        """
+        поля = ("id", "вид", "карточка", "итог")
+        with self._connect() as db:
+            return [dict(zip(поля, строка)) for строка in db.execute(
+                f"SELECT {', '.join(поля)} FROM inbox"
+                " WHERE карточка != '' AND статус IN (?,?) ORDER BY id LIMIT ?",
+                (*ЗАКРЫТЫЕ, limit),
+            )]
+
+    def карточка_погашена(self, id_: int) -> bool:
+        """Забыть карточку: её больше нет, гасить нечего."""
+        with self._connect() as db:
+            cur = db.execute("UPDATE inbox SET карточка='' WHERE id=?", (id_,))
+            return cur.rowcount > 0
+
     def запись(self, id_: int) -> dict | None:
         """Одна запись целиком, включая закрытые. Нет такой — None."""
         поля = ("id", "вид", "день", "текст", "зачем", "ключ", "случаев",
-                "последний", "статус", "итог", "разобрано", "вернуться")
+                "последний", "статус", "итог", "разобрано", "вернуться", "карточка")
         with self._connect() as db:
             строка = db.execute(
                 f"SELECT {', '.join(поля)} FROM inbox WHERE id=?", (id_,)

@@ -68,6 +68,14 @@ class ПоддельныйTodoist:
             self.created.append(json)
             self.tasks.append({"id": f"t{len(self.tasks) + 1}", "content": json["content"]})
             return self.tasks[-1]
+        if path.startswith("/tasks/") and path.endswith("/close"):
+            нужен = path.split("/")[2]
+            for з in self.tasks:
+                if str(з.get("id")) == нужен:
+                    з["checked"] = True
+                    return {}
+            from todoist_mcp.client import TodoistError
+            raise TodoistError(f"404 нет задачи {нужен}")
         raise AssertionError(f"неожиданный POST {path}")
 
 
@@ -765,6 +773,80 @@ def test_инструмент_заявки_доводит_её_до_todoist(todo
     assert len(свои) == 1, "заявка легла на полку, но карточки в Todoist нет"
     assert f"№{записи[0]['id']}" in свои[0]["description"], \
         "в карточке чужой номер — разбор закроет не ту запись"
+
+
+# ── обратная дорога: разобрали запись — карточка гаснет (дыра 13.08.2026) ────
+#
+# Заявка #129 была сделана и закрыта с итогом, а её карточка осталась висеть:
+# связи между записью и карточкой в базе не существовало вовсе, и гашение
+# держалось на человеческой памяти. Пять раз пронесло, на шестой висящую
+# карточку сделанной заявки нашёл владелец.
+
+
+def test_заявка_запоминает_номер_своей_карточки(todoist, tmp_path):
+    """Проводка целиком: без запомненного id гасить будет нечем."""
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    from src.inbox import ЗАЯВКА, Inbox
+    from src.wishes import build_wishes_server
+
+    полка = Inbox(tmp_path / "coach.db")
+    сервер = build_wishes_server(полка, todoist_token="токен")
+    вызвать = сервер["instance"].request_handlers[CallToolRequest]
+    asyncio.run(вызвать(CallToolRequest(
+        method="tools/call",
+        params=CallToolRequestParams(
+            name="record_wish",
+            arguments={"what": "Починить историю закрытых задач.", "why": "мешает"}),
+    )))
+
+    номер = полка.открытые(ЗАЯВКА)[0]["id"]
+    assert полка.запись(номер)["карточка"], "id карточки не доехал до полки"
+
+
+def test_закрытая_запись_гасит_свою_карточку(todoist, tmp_path):
+    from src.inbox import ЗАЯВКА, Inbox
+
+    полка = Inbox(tmp_path / "coach.db")
+    номер = полка.положить(ЗАЯВКА, "Починить историю закрытых задач.")
+    карточка = asyncio.run(backstage.raise_wish("токен", номер, "Починить историю."))
+    полка.запомнить_карточку(номер, карточка)
+    полка.закрыть(номер, "сделана", "Починено, 608 тестов зелёные.")
+
+    assert asyncio.run(backstage.погасить_карточки("токен", полка)) == 1
+    закрыта = [з for з in todoist.tasks if str(з["id"]) == карточка][0]
+    assert закрыта.get("checked"), "карточка разобранной заявки осталась висеть"
+    итог = [к for к in todoist.comments if к["task_id"] == карточка]
+    assert итог and "608 тестов" in итог[0]["content"], \
+        "карточка закрыта молча — через месяц не ответит, чем кончилось"
+    assert полка.запись(номер)["карточка"] == "", "гасить второй раз нечего"
+
+
+def test_открытая_запись_свою_карточку_не_гасит(todoist, tmp_path):
+    """Гашение идёт от факта закрытия. Неразобранное трогать нельзя."""
+    from src.inbox import ЗАЯВКА, Inbox
+
+    полка = Inbox(tmp_path / "coach.db")
+    номер = полка.положить(ЗАЯВКА, "Ещё не разобрано.")
+    полка.запомнить_карточку(номер, asyncio.run(
+        backstage.raise_wish("токен", номер, "Ещё не разобрано.")))
+
+    assert asyncio.run(backstage.погасить_карточки("токен", полка)) == 0
+    assert полка.запись(номер)["карточка"], "связь с живой карточкой потеряна"
+
+
+def test_карточки_уже_нет_и_это_не_беда(todoist, tmp_path):
+    """Ровно тот случай, ради которого всё делалось: её закрыли руками.
+    Гашение обязано это принять и перестать помнить о ней."""
+    from src.inbox import ЗАЯВКА, Inbox
+
+    полка = Inbox(tmp_path / "coach.db")
+    номер = полка.положить(ЗАЯВКА, "Закрыто руками в прошлом разборе.")
+    полка.запомнить_карточку(номер, "t404")
+    полка.закрыть(номер, "сделана", "Разобрано раньше.")
+
+    assert asyncio.run(backstage.погасить_карточки("токен", полка)) == 0
+    assert полка.запись(номер)["карточка"] == "", "полка помнит несуществующую карточку"
 
 
 # ── ночные задачи: один дом их имён (дыра поймана разбором 11.08.2026) ────────

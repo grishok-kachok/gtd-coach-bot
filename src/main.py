@@ -29,7 +29,7 @@ from telegram.ext import (
 
 from . import agenda
 from .archive import Archive
-from .backstage import raise_task
+from .backstage import raise_task, погасить_карточки
 from .brain import Brain
 from .comments import Канал, build_undo_server
 from .context_cost import ContextCost
@@ -1316,6 +1316,13 @@ class CoachBot:
                         self.todoist_token, "промахи",
                         f"Ночь {yesterday.isoformat()}: промахов {found['промахи']}.",
                     )
+
+                # Разобранное закрыто на полке — карточка в Todoist больше не дело.
+                # Сторож стоит здесь, а не рядом с закрытием: закрывают запись
+                # разными путями (коуч кнопкой, человек скриптом в разборе),
+                # и общего у этих путей — только наступившая ночь.
+                if self.todoist_token:
+                    await погасить_карточки(self.todoist_token, self.inbox)
 
                 # Снимок дел — прежде укрупнений: он должен успеть сохранить то,
                 # что человек может удалить завтра. Ноль токенов, чистый код.

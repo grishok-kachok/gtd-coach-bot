@@ -74,8 +74,14 @@ def build_wishes_server(inbox: Inbox, todoist_token: str = "", tz: str = "Europe
         #
         # Цену прежнего порядка увидели в тот же день: три заявки лежали одной
         # карточкой, две разобрали — а закрыть было нечего, карточка висела.
+        #
+        # Номер заведённой карточки кладём обратно на полку: без него закрытие
+        # заявки карточку не гасит, и та висит до чьей-нибудь памяти (13.08.2026
+        # не вспомнил никто — висела карточка сделанной заявки #129).
         if todoist_token and номер:
-            await raise_wish(todoist_token, номер, what)
+            карточка = await raise_wish(todoist_token, номер, what)
+            if карточка:
+                await asyncio.to_thread(inbox.запомнить_карточку, номер, карточка)
 
         log.info("заявка записана: %s", what[:80])
         return {"content": [{"type": "text", "text": (
