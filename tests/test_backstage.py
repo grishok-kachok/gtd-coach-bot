@@ -804,6 +804,32 @@ def test_заявка_запоминает_номер_своей_карточк�
     assert полка.запись(номер)["карточка"], "id карточки не доехал до полки"
 
 
+def test_заявка_без_зачем_всё_равно_ложится_на_полку(todoist, tmp_path):
+    """Проводка через движок, а не мимо него.
+
+    Короткая форма схемы делала «зачем» обязательным, и вызов отбивался
+    валидацией раньше, чем начинал работать код: заявка владельца не попадала
+    на полку вовсе. Тесты этого не видели — они звали кнопку с обоими полями,
+    как удобный человек, а не как живая модель.
+    """
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    from src.inbox import ЗАЯВКА, Inbox
+    from src.wishes import build_wishes_server
+
+    полка = Inbox(tmp_path / "coach.db")
+    сервер = build_wishes_server(полка, todoist_token="токен")
+    вызвать = сервер["instance"].request_handlers[CallToolRequest]
+    ответ = asyncio.run(вызвать(CallToolRequest(
+        method="tools/call",
+        params=CallToolRequestParams(name="record_wish",
+                                     arguments={"what": "Заявка без объяснения."}),
+    )))
+
+    assert not ответ.root.isError, f"движок отбил заявку: {ответ.root.content}"
+    assert len(полка.открытые(ЗАЯВКА)) == 1, "заявка потерялась молча"
+
+
 def test_закрытая_запись_гасит_свою_карточку(todoist, tmp_path):
     from src.inbox import ЗАЯВКА, Inbox
 

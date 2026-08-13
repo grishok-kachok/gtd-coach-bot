@@ -118,3 +118,75 @@ def test_ни_одна_кнопка_бота_не_объявлена_кирил�
             assert кнопка.name.isascii(), f"{имя}: имя «{кнопка.name}» не латиницей"
             for поле in (кнопка.inputSchema.get("properties") or {}):
                 assert поле.isascii(), f"{имя}.{кнопка.name}: поле «{поле}» не латиницей"
+
+
+# ── обязательные поля собственных кнопок бота (дыра 13.08.2026) ──────────────
+#
+# Та же болезнь, ради которой написан файл, вернулась с другой стороны: файл
+# сторожил кнопки Todoist и Календаря, а собственные кнопки бота объявлялись
+# короткой формой — и движок делал обязательными ВСЕ поля разом.
+#
+# Цена была живой. `record_wish` без «зачем» отбивался валидацией раньше кода:
+# заявка владельца не попадала на полку вовсе, хотя код всегда читал это поле
+# как необязательное. Рядом лежали ещё две: поиск по архиву требовал дня,
+# а дашборд — периода, при том что у обоих в коде есть умолчание.
+
+# Что кнопка ВПРАВЕ требовать. Пусто — не требует ничего.
+ОБЯЗАТЕЛЬНОЕ = {
+    "record_wish": {"what"},
+    "recall": {"query"},
+    "send_dashboard": set(),
+    "show_memory_proposals": set(),
+    "close_memory_proposal": {"item_id", "outcome", "result"},
+    "undo_last": set(),
+}
+
+
+def _кнопки_бота(tmp_path):
+    """Все собственные кнопки бота разом: имя → схема."""
+    import asyncio
+
+    from mcp.types import ListToolsRequest
+
+    from src.comments import Канал, build_undo_server
+    from src.dashboard_tool import build_dashboard_server
+    from src.inbox import Inbox
+    from src.inbox_tool import build_inbox_server
+    from src.recall import build_recall_server
+    from src.wishes import build_wishes_server
+
+    async def пусто(*a, **к):
+        return True
+
+    полка = Inbox(tmp_path / "coach.db")
+    серверы = (
+        build_wishes_server(полка, ""),
+        build_recall_server(tmp_path / "coach.db"),
+        build_dashboard_server(brain_dir=tmp_path, db_path=tmp_path / "coach.db",
+                               todoist_token="", send=пусто),
+        build_inbox_server(полка),
+        build_undo_server(Канал(token="X", db_path=tmp_path / "coach.db")),
+    )
+    схемы = {}
+    for сервер in серверы:
+        обработчик = сервер["instance"].request_handlers[ListToolsRequest]
+        for кнопка in asyncio.run(обработчик(ListToolsRequest(method="tools/list"))).root.tools:
+            схемы[кнопка.name] = кнопка.inputSchema
+    return схемы
+
+
+def test_кнопки_бота_требуют_только_то_что_обязательно(tmp_path):
+    кнопки = _кнопки_бота(tmp_path)
+    for имя, схема in кнопки.items():
+        assert имя in ОБЯЗАТЕЛЬНОЕ, (
+            f"кнопка «{имя}» новая — впиши её в ОБЯЗАТЕЛЬНОЕ, иначе короткая форма "
+            "схемы сделает обязательными все её поля молча"
+        )
+        assert set(схема.get("required") or []) == ОБЯЗАТЕЛЬНОЕ[имя], (
+            f"«{имя}» требует не то, что должна: {схема.get('required')}"
+        )
+
+
+def test_ни_одна_кнопка_бота_не_потерялась(tmp_path):
+    """Сторож бесполезен, если кнопку можно из него выронить."""
+    assert set(_кнопки_бота(tmp_path)) == set(ОБЯЗАТЕЛЬНОЕ)
