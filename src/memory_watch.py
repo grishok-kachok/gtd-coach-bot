@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 from pathlib import Path
 
@@ -78,8 +79,15 @@ class MemoryWatch:
                 parts.append(f"--- {folder}/{path.name} ---\n{path.read_text(encoding='utf-8')}")
         return "\n\n".join(parts)
 
-    @staticmethod
-    def _section(answer: str, name: str) -> list[str]:
+    # Отказ модели: «нет» в начале строки, дальше может тянуться объяснение,
+    # почему память сегодня молодец. Разбор 19.08.2026 нашёл, что за пять ночей
+    # шесть записей из семи оказались такими отписками: сравнение было точным
+    # (`body.lower() != "нет"`), а модель писала «нет. Наоборот: память
+    # отработала — …» — и вся отписка ехала на полку как промах.
+    ОТКАЗ = re.compile(r"^нет\b\s*[.,:;—–-]*\s*", re.IGNORECASE)
+
+    @classmethod
+    def _section(cls, answer: str, name: str) -> list[str]:
         """Достать раздел ответа. Разбор нарочно тупой: модель отвечает по форме."""
         lines = []
         inside = False
@@ -90,7 +98,7 @@ class MemoryWatch:
                 continue
             if inside and line.strip().startswith("-"):
                 body = line.strip()[1:].strip()
-                if body and body.lower() != "нет":
+                if body and not cls.ОТКАЗ.match(body):
                     lines.append(body)
         return lines
 
