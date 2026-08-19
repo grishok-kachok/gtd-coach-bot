@@ -46,7 +46,7 @@ from .prompts import followups, load as load_prompt, missing as missing_prompts
 from .recall import build_recall_server
 from . import rituals
 from .retry import retry_network
-from .rhythms import describe, path_in, read
+from .rhythms import describe, path_in, read, выключен
 from . import settings as coach_settings
 from .sessions import SessionStorage
 from .startup_budget import check as check_budget
@@ -1226,9 +1226,21 @@ class CoachBot:
         текст = свод.текст(давности)
         return f"{prompt}\n\n{текст}" if текст else prompt
 
+    def _дожимов_в_запасе(self) -> int:
+        """Сколько попыток достучаться у нас есть.
+
+        Число называет человек в своих ритмах (`дожим_раз`), а не плагин числом
+        файлов `дожим-N.md`: плагин общий у всех, а «дожимай меня дважды» или
+        «не дожимай вовсе» — настройка про конкретного человека. Ноль законен.
+
+        Текстов при этом может оказаться меньше, чем попыток, — тогда дожимаем
+        столько, сколько есть, и не падаем.
+        """
+        return min(self.rhythms["дожим_раз"], len(followups()))
+
     def _schedule_followup(self, context: ContextTypes.DEFAULT_TYPE, sent_at: str, attempt: int) -> None:
         """Завести следующую попытку достучаться, если она ещё в запасе."""
-        if attempt > len(followups()):
+        if attempt > self._дожимов_в_запасе():
             return
         context.job_queue.run_once(
             self.follow_up,
@@ -1251,9 +1263,11 @@ class CoachBot:
         if now.hour >= self.rhythms["тихий_час"] or now.hour < 8:
             log.info("дожим %s отменён: время тихое (%s)", attempt, now.strftime("%H:%M"))
             return
-        attempts = followups()
-        if attempt > len(attempts):  # промпт убрали из плагина, пока дожим ждал в очереди
+        # Перечитываем запас, а не верим очереди: пока дожим ждал своего часа,
+        # человек мог поставить себе `дожим_раз: 0`, а промпт — уехать из плагина.
+        if attempt > self._дожимов_в_запасе():
             return
+        attempts = followups()
         await self._think_and_reply(
             attempts[attempt - 1].text, self.owner_id, context, channel="nudge",
             сочинил_код=True,
@@ -1594,6 +1608,12 @@ class CoachBot:
             for job in queue.get_jobs_by_name(name):
                 job.schedule_removal()
         for key, (name, prompt_name, channel) in self.ALARMS.items():
+            # «день: нет» — человек отказался от дневного чек-ина. Будильник просто
+            # не вешается: выключенный чек-ин не приходит, остальные приходят
+            # по-прежнему. Раньше отказаться было нельзя вовсе.
+            if выключен(self.rhythms, key):
+                log.info("чек-ин «%s» выключен в ритмах — будильник не вешаю", key)
+                continue
             queue.run_daily(
                 self.ping, time=_parse(self.rhythms[key], MOSCOW),
                 data=(prompt_name, channel), name=name,
