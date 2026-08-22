@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from src import rhythms
 from src.rhythms import DEFAULTS, describe, read, выключен
 
 GOOD = """---
@@ -155,3 +156,25 @@ def test_утро_и_выжимку_выключить_нельзя(tmp_path, ke
 def test_чепуха_вместо_времени_подсказывает_про_нет(tmp_path):
     rhythms, problems = read(write(tmp_path, GOOD.replace('день: "14:30"', "день: никогда")))
     assert any("«нет»" in p for p in problems), problems
+
+
+# ── день ревизии (заявка #173, 22.08.2026) ───────────────────────────────────
+
+def test_день_ревизии_по_умолчанию_среда(tmp_path):
+    ритмы, претензии = read(tmp_path)
+    assert претензии == []
+    assert rhythms.день_ревизии(ритмы) == 2
+
+
+def test_день_ревизии_меняется_словом(tmp_path):
+    write(tmp_path, GOOD.replace("тихий_час: 23", "тихий_час: 23\nдень_ревизии: пятница"))
+    ритмы, претензии = read(tmp_path)
+    assert претензии == []
+    assert rhythms.день_ревизии(ритмы) == 4
+
+
+def test_день_ревизии_с_опечаткой_жалуется(tmp_path):
+    write(tmp_path, GOOD.replace("тихий_час: 23", "тихий_час: 23\nдень_ревизии: срида"))
+    ритмы, претензии = read(tmp_path)
+    assert претензии and "день_ревизии" in претензии[0]
+    assert rhythms.день_ревизии(ритмы) == 2, "расписание обязано остаться прежним"

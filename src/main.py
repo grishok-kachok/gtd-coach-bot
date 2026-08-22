@@ -46,6 +46,7 @@ from .prompts import followups, load as load_prompt, missing as missing_prompts
 from .recall import build_recall_server
 from . import rituals
 from .retry import retry_network
+from . import rhythms
 from .rhythms import describe, path_in, read, выключен
 from . import settings as coach_settings
 from .sessions import SessionStorage
@@ -1351,8 +1352,13 @@ class CoachBot:
                 # это уже долг, и он дёргает за рукав задачей. Прибор без
                 # реакции — декорация.
                 свод = await self._обход()
+                # Ревизия приходит раз в неделю, в назначенный день (ритмы).
+                # В остальные ночи счётчики суток всё равно двигаются — иначе
+                # к среде было бы нечего показывать.
+                ревизия = today.weekday() == rhythms.день_ревизии(self.rhythms)
                 висит = await asyncio.to_thread(
-                    detectors.запомнить, self.snapshot.db_path, свод, today
+                    detectors.запомнить, self.snapshot.db_path, свод, today,
+                    поднимать=ревизия,
                 )
                 if висит:
                     # Один вызов на всё созревшее, а не по вызову на отклонение.
@@ -1363,7 +1369,7 @@ class CoachBot:
                     # созревание их оказалось ровно шесть.
                     await raise_task(
                         self.todoist_token, "завал",
-                        f"{today.isoformat()}, держится третьи сутки:\n"
+                        f"{today.isoformat()}, стоит третьи сутки и дольше:\n"
                         + "\n".join(f"- {о.строка}" for о in висит),
                     )
 
