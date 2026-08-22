@@ -18,7 +18,7 @@ FROM python:3.12-slim
 # 13.08.2026: 2.1.228 → 2.1.231. Ночная задача звала на 229, но к разбору вышли
 # ещё две; ставим ту, что есть сегодня в npm, а не ту, что была ночью.
 # 19.08.2026: 2.1.231 → 2.1.235, тем же правилом — сверено `npm view` в день разбора.
-ARG CLAUDE_CODE_VERSION=2.1.237
+ARG CLAUDE_CODE_VERSION=2.1.239
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates curl gnupg openssh-client \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
