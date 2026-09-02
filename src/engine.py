@@ -32,6 +32,7 @@ from .settings import read as read_settings
 from .sessions import SessionStorage
 from .todoist import build_todoist_server
 from .dashboard_tool import build_dashboard_server
+from .finday import build_finday_server
 from .wishes import build_wishes_server
 
 log = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class CoachEngine:
         undo=None,
         cost: ContextCost | None = None,
         recall=None,
+        finday: dict | None = None,
     ) -> None:
         self.brain_dir = brain_dir
         self.sessions = session_storage
@@ -158,6 +160,11 @@ class CoachEngine:
             build_calendar_server(**calendar, switches=self._switches["calendar"])
             if calendar else None
         )
+        # Дела, привычки и деньги приложения FINDAY. Тем же правилом, что у
+        # календаря: не задан токен — сервера нет, и коуч работает как прежде.
+        # Заводится в самом конце: он ходит наружу по сети, и падение его
+        # сборки не должно уносить кнопки, которые работают локально.
+        self.finday_server = build_finday_server(**finday) if finday else None
 
     async def tools_weight(self) -> int:
         """Сколько байт весит объявление кнопок — полезная нагрузка, не контекст.
@@ -320,6 +327,9 @@ class CoachEngine:
         if self.recall_server is not None:
             mcp_servers["recall"] = self.recall_server
             allowed = allowed + ["mcp__recall"]
+        if self.finday_server is not None:
+            mcp_servers["finday"] = self.finday_server
+            allowed = allowed + ["mcp__finday"]
         return ClaudeAgentOptions(
             system_prompt=self._конституция(mode),
             cwd=str(self.brain_dir),

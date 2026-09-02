@@ -335,6 +335,7 @@ class CoachBot:
             model=env("COACH_MODEL", "claude-fable-5"),
             effort=env("COACH_EFFORT", "medium"),
             calendar=self._calendar_config(),
+            finday=self._finday_config(),
             extra_dirs=[PHOTOS_DIR],
             dashboard={
                 "brain_dir": self.brain_dir,
@@ -414,6 +415,25 @@ class CoachBot:
         if openai is None:
             log.warning("OPENAI_API_KEY не задан: у расшифровки нет запасного сервиса")
         return VoiceRecognizer(primary=primary, fallback=openai, proxy=proxy)
+
+    @staticmethod
+    def _finday_config() -> dict | None:
+        """Приложение FINDAY подключаем, только если задан токен.
+
+        Токен — обычная сессия приложения с меткой «Коуч» (выдаётся там командой
+        npm run coach:token). Она видна человеку в профиле среди устройств и
+        отзывается одним тапом; машинный секрет так не умеет.
+
+        Пусто — коуч работает как раньше и про дела приложения не знает. Это не
+        поломка, а рабочее состояние: так было до 02.09.2026."""
+        token = env("FINDAY_TOKEN")
+        if not token:
+            log.warning("FINDAY не подключён: не задан FINDAY_TOKEN")
+            return None
+        return {
+            "base_url": env("FINDAY_URL", "https://213-176-114-94.sslip.io"),
+            "token": token,
+        }
 
     @staticmethod
     def _calendar_config() -> dict | None:
