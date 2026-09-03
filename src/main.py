@@ -301,6 +301,9 @@ class CoachBot:
 
         self.brain = Brain(self.brain_dir)
         self.todoist_token = env("TODOIST_API_TOKEN", required=True)
+        # Приложение — дом дел с 03.09.2026. Живёт полем, а не только внутри
+        # движка: из него же считается сводка дел к каждой реплике.
+        self.finday = self._finday_config()
         # Заполняется в run(): через это приложение уходят файлы и жалобы канала.
         self.app: Application | None = None
         self.archive = Archive(Path(env("ARCHIVE_DB", "/archive/coach.db")))
@@ -335,7 +338,7 @@ class CoachBot:
             model=env("COACH_MODEL", "claude-fable-5"),
             effort=env("COACH_EFFORT", "medium"),
             calendar=self._calendar_config(),
-            finday=self._finday_config(),
+            finday=self.finday,
             extra_dirs=[PHOTOS_DIR],
             dashboard={
                 "brain_dir": self.brain_dir,
@@ -508,8 +511,10 @@ class CoachBot:
                 # сессиям она сработала в одной.
                 strategy = await asyncio.to_thread(self.engine.файлы_стратегии, mode)
                 # Сводку дел — к каждой реплике: коуч обязан знать картину дня всегда,
-                # а не когда вспомнит сходить в Todoist.
-                summary = await agenda.summary(self.todoist_token)
+                # а не когда вспомнит сходить за ней сам. Считается из FINDAY:
+                # дом дел там, и сводка обязана смотреть в тот же список, в
+                # который смотрит человек.
+                summary = await agenda.summary(self.finday)
                 answer = await self.engine.ask(
                     мостик + text if мостик else text, memory, summary, strategy, channel,
                 )
@@ -1611,7 +1616,7 @@ class CoachBot:
             # Держим строку ради видимости: она объявляет полезную нагрузку,
             # а не цену — цена целиком в токенах, и разница там в восемьдесят раз.
             "описания кнопок инструментов": await self.engine.tools_weight(),
-            "сводка дел — агрегат Todoist к каждой реплике": len(summary.encode("utf-8")),
+            "сводка дел — агрегат FINDAY к каждой реплике": len(summary.encode("utf-8")),
             # Свод завалов уезжает в контекст один раз в сутки — с утренним
             # чек-ином. Считаем его только тогда, когда он там правда есть:
             # в остальные разы это ноль, а не «забыли посчитать».

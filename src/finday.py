@@ -64,9 +64,10 @@ class ОтказFINDAY(Exception):
     """Приложение не ответило или отказало. Всегда показывается модели словами."""
 
 
-async def _запрос(
+async def запрос(
     база: str, запасной_токен: str, метод: str, путь: str, тело: dict | None = None
 ) -> Any:
+    """Один ход в приложение. Публичная: этой же дверью ходит сводка (agenda.py)."""
     token = _токен.get() or запасной_токен
     if not token:
         raise ОтказFINDAY("нет токена FINDAY — приложение недоступно, скажи об этом вслух")
@@ -88,6 +89,15 @@ async def _запрос(
         raise ОтказFINDAY(
             "приложение не приняло токен. Похоже, вход «Коуч» отключён в профиле — "
             "скажи об этом вслух, сам починить это нельзя"
+        )
+    if ответ.status_code == 404:
+        # Тоже отдельной строкой, и по той же причине, что 401: с появлением
+        # кнопок правки коуч ВПЕРВЫЕ называет номер записи сам. Промах по
+        # номеру — обычное дело (список устарел, номер придуман), и ответ на
+        # него — сходить за списком заново, а не сообщать о поломке.
+        raise ОтказFINDAY(
+            "приложение не нашло такой записи: номер устарел или выдуман. "
+            "Посмотри список заново и не говори, что сделал, — ты не сделал"
         )
     if ответ.status_code >= 400:
         raise ОтказFINDAY(f"приложение ответило {ответ.status_code}: {ответ.text[:200]}")
@@ -113,8 +123,44 @@ async def _запрос(
     "Показать все открытые дела с номерами и сроками. Зови, когда речь о списке "
     "целиком («что у меня висит», «разберём задачи»), — для сегодняшнего дня "
     "хватает finday_day.\n"
-    "Закрыть дело отсюда пока нельзя: галочку ставит человек в приложении. Не "
-    "обещай, что отметил, — скажи, что записал себе, и всё."
+    "Номер из этого списка — то, чем зовутся finday_close_task и "
+    "finday_update_task. Список устаревает: правишь дело из вчерашнего "
+    "разговора — сперва посмотри его заново."
+)
+
+ЗАВЕСТИ = (
+    "Завести дело в приложении. Поля: title — что сделать, по-человечески и "
+    "коротко; due_date — день вида 2026-09-10, без него дело без срока; "
+    "due_time — время вида 18:30; quadrant — разбор по матрице (сейчас, "
+    "планировать, между-делом, не-важно, неразобрано); category — personal, "
+    "work или other.\n"
+    "Заводи, когда человек просит записать или когда вы вместе решили, что он "
+    "это сделает. Не заводи из рассуждения вслух: лишнее в списке человек "
+    "вычищает руками, и после второго раза перестаёт верить списку целиком.\n"
+    "Срок ставь ТОЛЬКО названный. «Как-нибудь на неделе» — это без срока, а не "
+    "пятница: выдуманный срок назавтра станет просрочкой и будет врать в сводке "
+    "каждый день.\n"
+    "quadrant называй, только если важность и срочность прозвучали. Пустой "
+    "разбор честнее выдуманного — «неразобрано» это рабочее состояние, человек "
+    "разложит сам."
+)
+
+ЗАКРЫТЬ = (
+    "Отметить дело сделанным. done=false снимает галочку обратно. Номер берётся "
+    "из finday_day или finday_tasks.\n"
+    "Закрывай, когда человек сказал, что сделал. По догадке — нельзя: «ты же "
+    "собирался» это не факт, а закрытое дело человек находит только глазами."
+)
+
+ПОПРАВИТЬ = (
+    "Поправить дело: перенести срок, переименовать, разобрать важность. Номер — "
+    "из finday_day или finday_tasks. Передавай ТОЛЬКО то, что меняешь: "
+    "непереданное останется как было.\n"
+    "due_date и due_time переносят срок, drop_due=true снимает его вовсе, "
+    "quadrant ставит разбор по матрице, title переименовывает.\n"
+    "Разбор важности — самая полезная здесь правка: у части дел оси не заданы, "
+    "и в списке они висят «неразобрано». Разбирать их с человеком уместно, "
+    "решать за него — нет: спроси, важно ли это и горит ли."
 )
 
 ОСТАТОК = (
@@ -163,7 +209,7 @@ def build_finday_server(base_url: str, token: str):
         return {"content": [{"type": "text", "text": text}]}
 
     async def позвать(метод: str, путь: str, тело: dict | None = None) -> Any:
-        return await _запрос(base_url, token, метод, путь, тело)
+        return await запрос(base_url, token, метод, путь, тело)
 
     @tool("finday_day", ДЕНЬ, {"type": "object", "properties": {}})
     async def день(_args: dict[str, Any]) -> dict[str, Any]:
@@ -321,8 +367,127 @@ def build_finday_server(base_url: str, token: str):
             f"({e.get('category', '')}). Отменить человек может тапом в приложении."
         )
 
+    @tool("finday_create_task", ЗАВЕСТИ, {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Что сделать, коротко"},
+            "due_date": {"type": "string", "description": "День вида 2026-09-10"},
+            "due_time": {"type": "string", "description": "Время вида 18:30"},
+            "quadrant": {
+                "type": "string",
+                "description": "сейчас, планировать, между-делом, не-важно или неразобрано",
+            },
+            "category": {"type": "string", "description": "personal, work или other"},
+        },
+        "required": ["title"],
+    })
+    async def завести(args: dict[str, Any]) -> dict[str, Any]:
+        название = (args.get("title") or "").strip()
+        if not название:
+            return ok("Не завёл: нужно название — что именно сделать.")
+
+        тело: dict[str, Any] = {"title": название}
+        for снаружи, внутри in (
+            ("due_date", "dueDate"),
+            ("due_time", "dueTime"),
+            ("quadrant", "квадрант"),
+            ("category", "category"),
+        ):
+            if args.get(снаружи):
+                тело[внутри] = args[снаружи]
+
+        try:
+            d = await позвать("POST", "tasks", тело)
+        except ОтказFINDAY as err:
+            return ok(f"Не завёл: {err}")
+
+        t = d.get("task") or {}
+        log.info("FINDAY: заведено дело #%s", t.get("id"))
+        return ok(
+            f"Завёл в приложение: #{t.get('id')} {t.get('title', название)} — "
+            f"{t.get('when', 'без срока')} [{t.get('квадрант', '')}]."
+        )
+
+    @tool("finday_close_task", ЗАКРЫТЬ, {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "integer", "description": "Номер дела из finday_day или finday_tasks"},
+            "done": {"type": "boolean", "description": "false — снять галочку обратно"},
+        },
+        "required": ["task_id"],
+    })
+    async def закрыть(args: dict[str, Any]) -> dict[str, Any]:
+        номер = int(args.get("task_id") or 0)
+        if номер <= 0:
+            return ok("Не отметил: нужен номер дела — он есть в finday_day и finday_tasks.")
+        сделано = args.get("done") is not False
+
+        try:
+            d = await позвать("POST", f"tasks/{номер}/complete", {"done": сделано})
+        except ОтказFINDAY as err:
+            return ok(f"Не отметил: {err}")
+
+        t = d.get("task") or {}
+        log.info("FINDAY: дело #%s -> done=%s", номер, сделано)
+        return ok(
+            (f"Отметил сделанным: #{номер} {t.get('title', '')}."
+             if сделано
+             else f"Снял галочку обратно: #{номер} {t.get('title', '')} — {t.get('when', '')}.")
+        )
+
+    @tool("finday_update_task", ПОПРАВИТЬ, {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "integer", "description": "Номер дела из finday_day или finday_tasks"},
+            "title": {"type": "string", "description": "Новое название"},
+            "due_date": {"type": "string", "description": "Новый день вида 2026-09-10"},
+            "due_time": {"type": "string", "description": "Новое время вида 18:30"},
+            "drop_due": {"type": "boolean", "description": "true — снять срок вовсе"},
+            "quadrant": {
+                "type": "string",
+                "description": "сейчас, планировать, между-делом, не-важно или неразобрано",
+            },
+        },
+        "required": ["task_id"],
+    })
+    async def поправить(args: dict[str, Any]) -> dict[str, Any]:
+        номер = int(args.get("task_id") or 0)
+        if номер <= 0:
+            return ok("Не поправил: нужен номер дела — он есть в finday_day и finday_tasks.")
+
+        тело: dict[str, Any] = {}
+        if (args.get("title") or "").strip():
+            тело["title"] = args["title"].strip()
+        if args.get("quadrant"):
+            тело["квадрант"] = args["quadrant"]
+        # Снять срок и перенести срок — разные просьбы, и различает их
+        # ПРИСУТСТВИЕ ключа, а не его пустота: «не трогай» и «сотри» иначе
+        # слились бы в одно, и перенос названия молча обнулял бы дату.
+        if args.get("drop_due"):
+            тело["dueDate"] = None
+        else:
+            if args.get("due_date"):
+                тело["dueDate"] = args["due_date"]
+            if args.get("due_time"):
+                тело["dueTime"] = args["due_time"]
+
+        if not тело:
+            return ok("Не поправил: не сказано, что менять — срок, название или разбор.")
+
+        try:
+            d = await позвать("PATCH", f"tasks/{номер}", тело)
+        except ОтказFINDAY as err:
+            return ok(f"Не поправил: {err}")
+
+        t = d.get("task") or {}
+        log.info("FINDAY: поправлено дело #%s (%s)", номер, ", ".join(тело))
+        return ok(
+            f"Поправил: #{номер} {t.get('title', '')} — {t.get('when', '')} "
+            f"[{t.get('квадрант', '')}]."
+        )
+
     return create_sdk_mcp_server(
         name="finday",
         version="1.0.0",
-        tools=[день, дела, остаток, неделя, вопросы, записать],
+        tools=[день, дела, остаток, неделя, вопросы, записать, завести, закрыть, поправить],
     )

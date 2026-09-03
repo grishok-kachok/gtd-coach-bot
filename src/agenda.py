@@ -1,16 +1,27 @@
-"""Сводка дел: маленький агрегат Todoist, который коуч обязан знать всегда.
+"""Сводка дел: маленький агрегат FINDAY, который коуч обязан знать всегда.
 
 Правило (PROJECT.md, 31.07.2026): принудительно в контекст идёт только то, что
 коуч обязан знать всегда; подробности он достаёт инструментом, когда они
 понадобились. Вывалить все задачи — сотни тысяч токенов и нежизнеспособно.
 Вывалить агрегат — пара сотен.
 
-Почему кодом, а не просьбой «посмотри Todoist» в конституции: просьба в тексте
+Почему кодом, а не просьбой «посмотри дела» в конституции: просьба в тексте
 срабатывает, если модель не отвлеклась. Ровно на этом в июле протекло знание
 (разбор 31.07). Код по будильнику случается всегда.
 
-Дом факта остаётся один — Todoist. Это отражение, и правится оно только через
+**Дом дел переехал в приложение (03.09.2026).** Раньше здесь считался агрегат
+Todoist — и это была главная причина, по которой переезд не мог состояться
+просьбой: пока сводка бралась из Todoist, коуч в КАЖДОМ ходе говорил про
+список, в который человек уже не смотрит. Никакая строка в конституции этого не
+перевешивала, потому что код по будильнику сильнее текста. Теперь то же самое
+работает в нужную сторону.
+
+Дом факта остаётся один — FINDAY. Это отражение, и правится оно только через
 источник: хочешь другую сводку — меняй дела, а не сводку.
+
+Чего здесь больше нет: часов по меткам ⏱️S/M/L. Метки времени были устройством
+Todoist, в приложении их нет вовсе, и выдумывать им замену не из чего. Вместо
+веса — разбор по матрице: сколько дел названы важными и срочными сразу.
 """
 
 from __future__ import annotations
@@ -20,72 +31,89 @@ import os
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from todoist_mcp.client import TodoistClient, TodoistError
+from .finday import ОтказFINDAY, запрос
 
 log = logging.getLogger(__name__)
-
-# Метки веса из этапа 03: вес задачи — время, а не штука.
-MINUTES = {"⏱️S": 20, "⏱️M": 120, "⏱️L": 240}
 
 
 def _today() -> date:
     return datetime.now(ZoneInfo(os.environ.get("COACH_TZ") or "Europe/Moscow")).date()
 
 
-def _due_date(task: dict) -> date | None:
-    raw = (task.get("due") or {}).get("date") or ""
-    try:
-        return date.fromisoformat(raw[:10])
-    except ValueError:
-        return None
+def _открытые(дела: list[dict]) -> list[dict]:
+    return [t for t in дела if not t.get("done")]
 
 
-def _hours(tasks: list[dict]) -> float:
-    minutes = sum(MINUTES.get(label, 0) for task in tasks for label in task.get("labels") or [])
-    return round(minutes / 60, 1)
+def _дней(task: dict) -> int | None:
+    """Сколько дней до срока. Считает приложение: часовой пояс живёт там."""
+    значение = task.get("daysLeft")
+    return значение if isinstance(значение, int) else None
 
 
-async def _by_filter(client: TodoistClient, query: str, limit: int = 50) -> list[dict]:
-    data = await client.get("/tasks/filter", params={"query": query, "limit": limit})
-    return data.get("results", []) if isinstance(data, dict) else (data or [])
-
-
-async def summary(token: str) -> str:
-    """Одна-две строки про день. Пусто — значит Todoist не ответил; это не повод молчать.
+async def summary(finday: dict | None) -> str:
+    """Одна-две строки про день. Пусто — значит приложение не ответило; это не повод молчать.
 
     Ошибку глотаем намеренно: сводка — приправа, а не блюдо. Коуч должен ответить
-    пользователю даже когда Todoist лежит, и у него остаётся инструмент, чтобы сходить
-    за делами руками.
+    пользователю даже когда приложение лежит, и у него остаётся инструмент, чтобы
+    сходить за делами руками.
     """
+    if not finday:
+        return ""
+    база = finday.get("base_url") or ""
+    токен = finday.get("token") or ""
+
     try:
-        async with TodoistClient(token) as client:
-            now = _today()
-            current = await _by_filter(client, "today | overdue")
-            ahead = await _by_filter(client, "14 days")
-    except TodoistError as err:
+        день = await запрос(база, токен, "GET", "today")
+    except ОтказFINDAY as err:
         log.warning("сводка дел не собралась: %s", err)
         return ""
     except Exception:
         log.exception("сводка дел не собралась")
         return ""
 
-    overdue = [t for t in current if (d := _due_date(t)) and d < now]
-    today = [t for t in current if t not in overdue]
-    urgent = [t for t in today if (t.get("priority") or 1) == 4]
+    открытые = _открытые(день.get("tasks") or [])
+    просрочено = [t for t in открытые if (д := _дней(t)) is not None and д < 0]
+    сегодня = [t for t in открытые if _дней(t) == 0]
+    # Дела без срока приложение показывает на том же экране. В счёт «дел на
+    # сегодня» они не идут — иначе число растёт от старых записей и перестаёт
+    # что-либо значить, — но и молчать о них нельзя: там же живёт половина
+    # списка.
+    без_срока = [t for t in открытые if _дней(t) is None]
+    горит = [t for t in просрочено + сегодня if t.get("квадрант") == "сейчас"]
 
-    lines = [
-        f"Сегодня {now.isoformat()}: дел {len(today)}"
-        + (f", из них p1 — {len(urgent)}" if urgent else "")
-        + (f", по меткам времени ~{_hours(today)} ч" if _hours(today) else "")
-        + (f". Просрочено: {len(overdue)}" if overdue else ". Просроченного нет")
+    строки = [
+        f"Сегодня {_today().isoformat()}: дел {len(сегодня)}"
+        + (f", из них «сейчас» — {len(горит)}" if горит else "")
+        + (f". Просрочено: {len(просрочено)}" if просрочено else ". Просроченного нет")
+        + (f". Без срока висит {len(без_срока)}" if без_срока else "")
     ]
 
-    later = sorted(
-        ((d, t) for t in ahead if (d := _due_date(t)) and d > now), key=lambda pair: pair[0]
-    )
-    if later:
-        when, task = later[0]
-        lines.append(f"Ближайший срок после сегодня: «{task['content']}» — {when.isoformat()}.")
+    ближайшее = await _ближайший_срок(база, токен)
+    if ближайшее:
+        строки.append(ближайшее)
 
-    lines.append("Это агрегат. Нужны сами дела — сходи инструментом find_tasks.")
-    return "\n".join(lines)
+    строки.append("Это агрегат. Нужны сами дела — сходи инструментом finday_tasks.")
+    return "\n".join(строки)
+
+
+async def _ближайший_срок(база: str, токен: str) -> str:
+    """Первое дело со сроком после сегодня — отдельным запросом и отдельной попыткой.
+
+    Отдельной: экран дня знает только про сегодня, а «что надвигается» — это
+    весь список. Если второй запрос не удался, первая строка всё равно уезжает
+    в контекст: половина сводки лучше пустоты.
+    """
+    try:
+        все = await запрос(база, токен, "GET", "tasks")
+    except Exception:
+        log.warning("ближайший срок не собрался", exc_info=True)
+        return ""
+
+    впереди = sorted(
+        (t for t in _открытые(все.get("tasks") or []) if (д := _дней(t)) is not None and д > 0),
+        key=lambda t: t["daysLeft"],
+    )
+    if not впереди:
+        return ""
+    ближайшее = впереди[0]
+    return f"Ближайший срок после сегодня: «{ближайшее.get('title', '')}» — {ближайшее.get('when', '')}."
